@@ -262,6 +262,24 @@ class Phase2Manager:
             log.debug("Phase2.generate_response: LLM not loaded — returning ''")
             return ""
 
+        # ── Local Curated Clinical Knowledge Base Scoping ─────────────────
+        from modules.medical_kb import (
+            is_medical_inquiry,
+            is_query_in_scope,
+            get_curated_grounding_context,
+            EXPLICIT_REFUSAL_MESSAGE,
+        )
+        force_kb = kwargs.get("require_kb_grounding", False)
+        is_med = force_kb or (user_text and is_medical_inquiry(user_text))
+
+        grounding_context = ""
+        if is_med:
+            in_scope, matched = is_query_in_scope(user_text)
+            if not in_scope:
+                log.info("Phase2: Medical query out of local KB scope — issuing explicit refusal.")
+                return EXPLICIT_REFUSAL_MESSAGE
+            grounding_context, _ = get_curated_grounding_context(user_text)
+
         vitals_str = f" Physiological vitals: {vitals_summary}." if vitals_summary else ""
         system_prompt = (
             f"You are MAITRI, the autonomous onboard AI psychological and clinical support companion "
@@ -278,6 +296,14 @@ class Phase2Manager:
             f"and sensory anchoring.\n"
             f"- Never panic, never suggest aborting unless life-critical, and maintain calm reassuring mission presence."
         )
+
+        if grounding_context:
+            system_prompt += (
+                f"\n\nLocal Verified Aerospace Clinical Knowledge Reference:\n{grounding_context}\n"
+                f"- Ground your response strictly on the verified reference above.\n"
+                f"- Cite the source reference (e.g. PubMed/NASA-STD-3001) in your response.\n"
+                f"- Never speculate or fabricate clinical diagnoses beyond this reference."
+            )
 
         prompt_parts = [f"<|system|>\n{system_prompt}<|end|>"]
         if chat_history:

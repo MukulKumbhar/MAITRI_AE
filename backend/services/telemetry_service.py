@@ -130,6 +130,12 @@ def _build_telemetry_payload(state) -> Dict[str, Any]:
                 f"ECLSS CO2 Critical: {state.cabin_co2:.1f} mmHg exceeds 7.0 mmHg toxicity limit",
                 "cabin_env"
             )
+        elif getattr(state, "cabin_co2", 3.0) >= 4.5:
+            state.alarm_manager.raise_alarm(
+                "CO2_HIGH_WARN", "MEDIUM",
+                f"Elevated Cabin CO2: {state.cabin_co2:.1f} mmHg (Law 2014 headache risk elevated)",
+                "cabin_env"
+            )
 
         # Check unacknowledged alarm escalation (3-min rule)
         state.alarm_manager.check_escalation()
@@ -255,6 +261,11 @@ def _build_telemetry_payload(state) -> Dict[str, Any]:
             "pressure_kpa": getattr(state, "cabin_pressure", 101.3),
             "ambient_temp_c": getattr(state, "cabin_temp", 22.0),
             "noise_dba": getattr(state, "cabin_noise", 58.0),
+            "co2_headache_hazard": (
+                state.calculate_co2_headache_hazard(getattr(state, "cabin_co2", 3.0))
+                if hasattr(state, "calculate_co2_headache_hazard")
+                else {}
+            ),
         },
         "alarms": state.alarm_manager.get_summary() if hasattr(state, "alarm_manager") else {},
         "sensor_adapter": state.sensor_adapter.get_status() if hasattr(state, "sensor_adapter") else {"mode": "manual"},

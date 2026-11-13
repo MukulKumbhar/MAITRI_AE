@@ -331,6 +331,70 @@ class VoiceService:
         elif intent == "navigate_support":
             await self._emit({"type": "voice_action_dispatched", "action": "navigate", "target": "support"})
             await self._speak_feedback("Connecting to psychological support engine.")
+        elif intent == "navigate_clinical":
+            await self._emit({"type": "voice_action_dispatched", "action": "navigate", "target": "clinical"})
+            await self._speak_feedback("Opening clinical monitoring and diagnostics panel.")
+        elif intent == "navigate_sleep":
+            await self._emit({"type": "voice_action_dispatched", "action": "navigate", "target": "sleep"})
+            await self._speak_feedback("Opening circadian and orbital cycle tracker.")
+
+        elif intent == "start_pvt":
+            from modules.pvt_module import PVTSession
+            from backend.api import clinical
+            clinical._active_pvt_session = PVTSession(crew_member=getattr(state, "active_crew", "Astronaut"), duration_s=180.0)
+            clinical._active_pvt_session.start()
+            await self._emit({
+                "type": "voice_action_dispatched",
+                "action": "start_pvt",
+                "session": clinical._active_pvt_session.get_status(),
+            })
+            await self._speak_feedback("Starting PVT-B Reaction Self Test. Tap console when stimulus appears.")
+
+        elif intent == "stop_pvt":
+            from backend.api import clinical
+            if clinical._active_pvt_session:
+                clinical._active_pvt_session.abort()
+            await self._emit({
+                "type": "voice_action_dispatched",
+                "action": "stop_pvt",
+            })
+            await self._speak_feedback("Psychomotor Vigilance Test aborted.")
+
+        elif intent == "screener_depression":
+            await self._emit({
+                "type": "voice_action_dispatched",
+                "action": "open_screener",
+                "screener_type": "PHQ-9",
+            })
+            await self._speak_feedback("Opening PHQ-9 depression screener on console.")
+
+        elif intent == "screener_anxiety":
+            await self._emit({
+                "type": "voice_action_dispatched",
+                "action": "open_screener",
+                "screener_type": "GAD-7",
+            })
+            await self._speak_feedback("Opening GAD-7 anxiety screener on console.")
+
+        elif intent == "checklist_ammonia":
+            from modules.medical_kb import get_emergency_checklist
+            cl = get_emergency_checklist("checklist_ammonia")
+            await self._emit({
+                "type": "voice_action_dispatched",
+                "action": "open_checklist",
+                "checklist": cl,
+            })
+            await self._speak_feedback("Ammonia leak checklist initiated. Don emergency mask immediately.")
+
+        elif intent == "checklist_trauma":
+            from modules.medical_kb import get_emergency_checklist
+            cl = get_emergency_checklist("checklist_trauma")
+            await self._emit({
+                "type": "voice_action_dispatched",
+                "action": "open_checklist",
+                "checklist": cl,
+            })
+            await self._speak_feedback("Acute trauma checklist initiated. Apply direct pressure to wound.")
 
         elif intent == "set_heart_rate":
             val = entities.get("value")

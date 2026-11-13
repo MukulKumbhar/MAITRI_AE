@@ -80,6 +80,65 @@ CREATE TABLE IF NOT EXISTS alarm_events (
     prev_hash       TEXT DEFAULT '0000000000000000000000000000000000000000000000000000000000000000',
     record_hash     TEXT DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS pvt_logs (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id          TEXT NOT NULL,
+    timestamp           TEXT NOT NULL,
+    crew_member         TEXT DEFAULT 'Astronaut',
+    duration_s          REAL DEFAULT 180.0,
+    total_stimuli       INTEGER DEFAULT 0,
+    valid_hits          INTEGER DEFAULT 0,
+    lapses              INTEGER DEFAULT 0,
+    false_starts        INTEGER DEFAULT 0,
+    mean_rt_ms          REAL DEFAULT 0.0,
+    median_rt_ms        REAL DEFAULT 0.0,
+    fastest_10pct_rt_ms REAL DEFAULT 0.0,
+    slowest_10pct_rt_ms REAL DEFAULT 0.0,
+    mean_speed          REAL DEFAULT 0.0,
+    fatigue_risk_score  REAL DEFAULT 0.0,
+    performance_category TEXT DEFAULT 'OPTIMAL',
+    raw_rts_json        TEXT DEFAULT '[]',
+    prev_hash           TEXT DEFAULT '0000000000000000000000000000000000000000000000000000000000000000',
+    record_hash         TEXT DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS sleep_records (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp               TEXT NOT NULL,
+    crew_member             TEXT DEFAULT 'Astronaut',
+    sleep_date              TEXT NOT NULL,
+    sleep_duration_hours    REAL DEFAULT 8.0,
+    target_sleep_hours      REAL DEFAULT 8.0,
+    sleep_debt_hours        REAL DEFAULT 0.0,
+    cumulative_debt_hours   REAL DEFAULT 0.0,
+    chronic_fatigue_risk    REAL DEFAULT 0.0,
+    circadian_phase_rad     REAL DEFAULT 0.0,
+    melatonin_suppression_pct REAL DEFAULT 0.0,
+    light_exposure_lux      REAL DEFAULT 120.0,
+    clinical_status         TEXT DEFAULT 'NOMINAL',
+    notes                   TEXT DEFAULT '',
+    prev_hash               TEXT DEFAULT '0000000000000000000000000000000000000000000000000000000000000000',
+    record_hash             TEXT DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS screener_records (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp               TEXT NOT NULL,
+    crew_member             TEXT DEFAULT 'Astronaut',
+    screener_type           TEXT NOT NULL,
+    total_score             INTEGER NOT NULL,
+    max_possible_score      INTEGER NOT NULL,
+    severity                TEXT NOT NULL,
+    item_responses_json     TEXT NOT NULL,
+    safety_alert            INTEGER DEFAULT 0,
+    safety_message          TEXT DEFAULT '',
+    third_quarter_risk_index REAL DEFAULT 0.0,
+    clinical_interpretation TEXT DEFAULT '',
+    action_recommendation   TEXT DEFAULT '',
+    prev_hash               TEXT DEFAULT '0000000000000000000000000000000000000000000000000000000000000000',
+    record_hash             TEXT DEFAULT ''
+);
 """
 
 _MIGRATIONS = [
@@ -525,3 +584,412 @@ def get_psych_logs(limit: int = 50, db_path: Optional[str] = None) -> pd.DataFra
         df = pd.DataFrame()
     conn.close()
     return df
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PVT-B Reaction Self-Test Logs with Cryptographic Hash Chaining
+# ─────────────────────────────────────────────────────────────────────────────
+
+def log_pvt_result(
+    session_id: str,
+    crew_member: str = "Astronaut",
+    duration_s: float = 180.0,
+    total_stimuli: int = 0,
+    valid_hits: int = 0,
+    lapses: int = 0,
+    false_starts: int = 0,
+    mean_rt_ms: float = 0.0,
+    median_rt_ms: float = 0.0,
+    fastest_10pct_rt_ms: float = 0.0,
+    slowest_10pct_rt_ms: float = 0.0,
+    mean_speed: float = 0.0,
+    fatigue_risk_score: float = 0.0,
+    performance_category: str = "OPTIMAL",
+    raw_rts: Optional[List[float]] = None,
+    db_path: Optional[str] = None,
+) -> Tuple[str, str]:
+    """
+    Log a PVT-B test result with cryptographic SHA-256 hash chaining.
+    Returns (prev_hash, record_hash).
+    """
+    path = db_path or DB_FILE
+    init_db(path)
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    raw_rts_json = json.dumps(raw_rts or [])
+
+    conn = sqlite3.connect(path)
+    c = conn.cursor()
+
+    c.execute("SELECT record_hash FROM pvt_logs WHERE record_hash IS NOT NULL AND record_hash != '' ORDER BY id DESC LIMIT 1")
+    row = c.fetchone()
+    prev_hash = row[0] if (row and row[0]) else GENESIS_HASH
+
+    canonical = (
+        f"{timestamp}|{session_id}|{crew_member}|{duration_s:.1f}|{total_stimuli}|"
+        f"{valid_hits}|{lapses}|{false_starts}|{mean_rt_ms:.1f}|{median_rt_ms:.1f}|"
+        f"{mean_speed:.3f}|{fatigue_risk_score:.1f}|{performance_category}|{raw_rts_json}"
+    )
+    record_hash = compute_telemetry_hash(prev_hash, canonical)
+
+    c.execute(
+        """INSERT INTO pvt_logs
+           (session_id, timestamp, crew_member, duration_s, total_stimuli, valid_hits,
+            lapses, false_starts, mean_rt_ms, median_rt_ms, fastest_10pct_rt_ms,
+            slowest_10pct_rt_ms, mean_speed, fatigue_risk_score, performance_category,
+            raw_rts_json, prev_hash, record_hash)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            session_id,
+            timestamp,
+            crew_member,
+            duration_s,
+            total_stimuli,
+            valid_hits,
+            lapses,
+            false_starts,
+            mean_rt_ms,
+            median_rt_ms,
+            fastest_10pct_rt_ms,
+            slowest_10pct_rt_ms,
+            mean_speed,
+            fatigue_risk_score,
+            performance_category,
+            raw_rts_json,
+            prev_hash,
+            record_hash,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return prev_hash, record_hash
+
+
+def verify_pvt_logs_hash_chain(db_path: Optional[str] = None) -> Tuple[bool, Optional[int]]:
+    """
+    Verifies that pvt_logs forms an unbroken cryptographic SHA-256 hash chain.
+    Returns (is_valid, failing_record_id).
+    """
+    path = db_path or DB_FILE
+    init_db(path)
+    conn = sqlite3.connect(path)
+    c = conn.cursor()
+    c.execute(
+        """SELECT id, prev_hash, record_hash, timestamp, session_id, crew_member,
+                  duration_s, total_stimuli, valid_hits, lapses, false_starts,
+                  mean_rt_ms, median_rt_ms, mean_speed, fatigue_risk_score,
+                  performance_category, raw_rts_json
+           FROM pvt_logs ORDER BY id ASC"""
+    )
+    rows = c.fetchall()
+    conn.close()
+
+    if not rows:
+        return True, None
+
+    expected_prev = rows[0][1] or GENESIS_HASH
+    for r in rows:
+        rec_id = r[0]
+        actual_prev = r[1]
+        actual_hash = r[2]
+
+        if not actual_hash:
+            continue
+
+        if actual_prev != expected_prev:
+            return False, rec_id
+
+        canonical = (
+            f"{r[3]}|{r[4]}|{r[5]}|{float(r[6]):.1f}|{int(r[7])}|"
+            f"{int(r[8])}|{int(r[9])}|{int(r[10])}|{float(r[11]):.1f}|{float(r[12]):.1f}|"
+            f"{float(r[13]):.3f}|{float(r[14]):.1f}|{r[15]}|{r[16]}"
+        )
+        computed = compute_telemetry_hash(actual_prev, canonical)
+        if computed != actual_hash:
+            return False, rec_id
+
+        expected_prev = actual_hash
+
+    return True, None
+
+
+def get_pvt_logs(limit: int = 50, db_path: Optional[str] = None) -> pd.DataFrame:
+    """Return recent PVT-B test records, newest first."""
+    path = db_path or DB_FILE
+    init_db(path)
+    conn = sqlite3.connect(path)
+    try:
+        df = pd.read_sql_query(
+            f"SELECT * FROM pvt_logs ORDER BY id DESC LIMIT {limit}", conn
+        )
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sleep & Circadian Records with Cryptographic Hash Chaining
+# ─────────────────────────────────────────────────────────────────────────────
+
+def log_sleep_record(
+    sleep_date: str,
+    sleep_duration_hours: float,
+    target_sleep_hours: float = 8.0,
+    sleep_debt_hours: float = 0.0,
+    cumulative_debt_hours: float = 0.0,
+    chronic_fatigue_risk: float = 0.0,
+    circadian_phase_rad: float = 0.0,
+    melatonin_suppression_pct: float = 0.0,
+    light_exposure_lux: float = 120.0,
+    clinical_status: str = "NOMINAL",
+    notes: str = "",
+    crew_member: str = "Astronaut",
+    db_path: Optional[str] = None,
+) -> Tuple[str, str]:
+    """
+    Log a daily sleep & circadian record with cryptographic SHA-256 hash chaining.
+    Returns (prev_hash, record_hash).
+    """
+    path = db_path or DB_FILE
+    init_db(path)
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    conn = sqlite3.connect(path)
+    c = conn.cursor()
+
+    c.execute("SELECT record_hash FROM sleep_records WHERE record_hash IS NOT NULL AND record_hash != '' ORDER BY id DESC LIMIT 1")
+    row = c.fetchone()
+    prev_hash = row[0] if (row and row[0]) else GENESIS_HASH
+
+    canonical = (
+        f"{timestamp}|{crew_member}|{sleep_date}|{sleep_duration_hours:.2f}|"
+        f"{target_sleep_hours:.2f}|{sleep_debt_hours:.2f}|{cumulative_debt_hours:.2f}|"
+        f"{chronic_fatigue_risk:.1f}|{circadian_phase_rad:.4f}|{melatonin_suppression_pct:.1f}|"
+        f"{light_exposure_lux:.1f}|{clinical_status}"
+    )
+    record_hash = compute_telemetry_hash(prev_hash, canonical)
+
+    c.execute(
+        """INSERT INTO sleep_records
+           (timestamp, crew_member, sleep_date, sleep_duration_hours, target_sleep_hours,
+            sleep_debt_hours, cumulative_debt_hours, chronic_fatigue_risk,
+            circadian_phase_rad, melatonin_suppression_pct, light_exposure_lux,
+            clinical_status, notes, prev_hash, record_hash)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            timestamp,
+            crew_member,
+            sleep_date,
+            sleep_duration_hours,
+            target_sleep_hours,
+            sleep_debt_hours,
+            cumulative_debt_hours,
+            chronic_fatigue_risk,
+            circadian_phase_rad,
+            melatonin_suppression_pct,
+            light_exposure_lux,
+            clinical_status,
+            notes,
+            prev_hash,
+            record_hash,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return prev_hash, record_hash
+
+
+def verify_sleep_records_hash_chain(db_path: Optional[str] = None) -> Tuple[bool, Optional[int]]:
+    """
+    Verifies that sleep_records forms an unbroken cryptographic SHA-256 hash chain.
+    Returns (is_valid, failing_record_id).
+    """
+    path = db_path or DB_FILE
+    init_db(path)
+    conn = sqlite3.connect(path)
+    c = conn.cursor()
+    c.execute(
+        """SELECT id, prev_hash, record_hash, timestamp, crew_member, sleep_date,
+                  sleep_duration_hours, target_sleep_hours, sleep_debt_hours,
+                  cumulative_debt_hours, chronic_fatigue_risk, circadian_phase_rad,
+                  melatonin_suppression_pct, light_exposure_lux, clinical_status
+           FROM sleep_records ORDER BY id ASC"""
+    )
+    rows = c.fetchall()
+    conn.close()
+
+    if not rows:
+        return True, None
+
+    expected_prev = rows[0][1] or GENESIS_HASH
+    for r in rows:
+        rec_id = r[0]
+        actual_prev = r[1]
+        actual_hash = r[2]
+
+        if not actual_hash:
+            continue
+
+        if actual_prev != expected_prev:
+            return False, rec_id
+
+        canonical = (
+            f"{r[3]}|{r[4]}|{r[5]}|{float(r[6]):.2f}|"
+            f"{float(r[7]):.2f}|{float(r[8]):.2f}|{float(r[9]):.2f}|"
+            f"{float(r[10]):.1f}|{float(r[11]):.4f}|{float(r[12]):.1f}|"
+            f"{float(r[13]):.1f}|{r[14]}"
+        )
+        computed = compute_telemetry_hash(actual_prev, canonical)
+        if computed != actual_hash:
+            return False, rec_id
+
+        expected_prev = actual_hash
+
+    return True, None
+
+
+def get_sleep_records(limit: int = 50, db_path: Optional[str] = None) -> pd.DataFrame:
+    """Return recent sleep records, newest first."""
+    path = db_path or DB_FILE
+    init_db(path)
+    conn = sqlite3.connect(path)
+    try:
+        df = pd.read_sql_query(
+            f"SELECT * FROM sleep_records ORDER BY id DESC LIMIT {limit}", conn
+        )
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Screener Records (PHQ-9, GAD-7, PSS-4) with Cryptographic Hash Chaining
+# ─────────────────────────────────────────────────────────────────────────────
+
+def log_screener_record(
+    screener_type: str,
+    total_score: int,
+    max_possible_score: int,
+    severity: str,
+    item_responses: List[int],
+    safety_alert: bool = False,
+    safety_message: str = "",
+    third_quarter_risk_index: float = 0.0,
+    clinical_interpretation: str = "",
+    action_recommendation: str = "",
+    crew_member: str = "Astronaut",
+    db_path: Optional[str] = None,
+) -> Tuple[str, str]:
+    """
+    Log a clinical psychometric screener record with cryptographic SHA-256 hash chaining.
+    Returns (prev_hash, record_hash).
+    """
+    path = db_path or DB_FILE
+    init_db(path)
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    item_responses_json = json.dumps(item_responses)
+    safety_int = 1 if safety_alert else 0
+
+    conn = sqlite3.connect(path)
+    c = conn.cursor()
+
+    c.execute("SELECT record_hash FROM screener_records WHERE record_hash IS NOT NULL AND record_hash != '' ORDER BY id DESC LIMIT 1")
+    row = c.fetchone()
+    prev_hash = row[0] if (row and row[0]) else GENESIS_HASH
+
+    canonical = (
+        f"{timestamp}|{crew_member}|{screener_type}|{total_score}|{max_possible_score}|"
+        f"{severity}|{item_responses_json}|{safety_int}|{third_quarter_risk_index:.1f}"
+    )
+    record_hash = compute_telemetry_hash(prev_hash, canonical)
+
+    c.execute(
+        """INSERT INTO screener_records
+           (timestamp, crew_member, screener_type, total_score, max_possible_score,
+            severity, item_responses_json, safety_alert, safety_message,
+            third_quarter_risk_index, clinical_interpretation, action_recommendation,
+            prev_hash, record_hash)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            timestamp,
+            crew_member,
+            screener_type,
+            total_score,
+            max_possible_score,
+            severity,
+            item_responses_json,
+            safety_int,
+            safety_message,
+            third_quarter_risk_index,
+            clinical_interpretation,
+            action_recommendation,
+            prev_hash,
+            record_hash,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return prev_hash, record_hash
+
+
+def verify_screener_records_hash_chain(db_path: Optional[str] = None) -> Tuple[bool, Optional[int]]:
+    """
+    Verifies that screener_records forms an unbroken cryptographic SHA-256 hash chain.
+    Returns (is_valid, failing_record_id).
+    """
+    path = db_path or DB_FILE
+    init_db(path)
+    conn = sqlite3.connect(path)
+    c = conn.cursor()
+    c.execute(
+        """SELECT id, prev_hash, record_hash, timestamp, crew_member, screener_type,
+                  total_score, max_possible_score, severity, item_responses_json,
+                  safety_alert, third_quarter_risk_index
+           FROM screener_records ORDER BY id ASC"""
+    )
+    rows = c.fetchall()
+    conn.close()
+
+    if not rows:
+        return True, None
+
+    expected_prev = rows[0][1] or GENESIS_HASH
+    for r in rows:
+        rec_id = r[0]
+        actual_prev = r[1]
+        actual_hash = r[2]
+
+        if not actual_hash:
+            continue
+
+        if actual_prev != expected_prev:
+            return False, rec_id
+
+        canonical = (
+            f"{r[3]}|{r[4]}|{r[5]}|{int(r[6])}|{int(r[7])}|"
+            f"{r[8]}|{r[9]}|{int(r[10])}|{float(r[11]):.1f}"
+        )
+        computed = compute_telemetry_hash(actual_prev, canonical)
+        if computed != actual_hash:
+            return False, rec_id
+
+        expected_prev = actual_hash
+
+    return True, None
+
+
+def get_screener_records(limit: int = 50, db_path: Optional[str] = None) -> pd.DataFrame:
+    """Return recent clinical screener records, newest first."""
+    path = db_path or DB_FILE
+    init_db(path)
+    conn = sqlite3.connect(path)
+    try:
+        df = pd.read_sql_query(
+            f"SELECT * FROM screener_records ORDER BY id DESC LIMIT {limit}", conn
+        )
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+

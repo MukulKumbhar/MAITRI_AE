@@ -440,6 +440,55 @@ class AuditHashChain:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Dr. Law (2014) CO2-Headache Hazard Model
+# ─────────────────────────────────────────────────────────────────────────────
+
+def calculate_law2014_headache_odds(co2_mmhg: float, baseline_co2: float = 2.0) -> Dict[str, Any]:
+    """
+    Computes headache odds ratio and probability based on Dr. Law et al. (2014).
+
+    Finding: For each 1-mm Hg increase in ambient cabin PCO2, the odds of a crew
+    member reporting a headache doubled (Odds Ratio = 2.0 per mmHg increase).
+    Reference:
+        Law J, Watkins S, Alexander D. Relationship Between Carbon Dioxide Levels
+        and Reported Headaches on the International Space Station.
+        J Occup Environ Med. 2014;56(5):477-483.
+    """
+    delta_co2 = max(0.0, float(co2_mmhg) - baseline_co2)
+    # Odds ratio doubles per 1 mmHg above baseline: OR = 2.0^(delta)
+    odds_ratio = 2.0 ** delta_co2
+
+    # Baseline headache probability in nominal spaceflight (~5% or 0.05 odds)
+    baseline_odds = 0.05
+    elevated_odds = baseline_odds * odds_ratio
+    prob_headache = elevated_odds / (1.0 + elevated_odds)
+
+    if co2_mmhg < 3.0:
+        risk_level = "NOMINAL"
+        recommendation = "Atmospheric CO2 within safe operational bounds (<3.0 mmHg)."
+    elif co2_mmhg < 5.0:
+        risk_level = "ELEVATED"
+        recommendation = "Elevated CO2. Increase cabin fan airflow; monitor for mild headache or somnolence."
+    elif co2_mmhg < 7.0:
+        risk_level = "HIGH"
+        recommendation = "High CO2 hazard. Verify CDRA/METOX scrubbers; deploy supplemental CO2 absorption."
+    else:
+        risk_level = "CRITICAL"
+        recommendation = "Critical hypercapnia toxicity threshold. Immediate flight surgeon alert and ECLSS intervention."
+
+    return {
+        "co2_mmhg": round(co2_mmhg, 2),
+        "baseline_co2_mmhg": baseline_co2,
+        "delta_co2_mmhg": round(delta_co2, 2),
+        "odds_ratio": round(odds_ratio, 2),
+        "headache_probability_pct": round(prob_headache * 100.0, 1),
+        "risk_level": risk_level,
+        "recommendation": recommendation,
+        "citation": "Law J, Watkins S, Alexander D. J Occup Environ Med. 2014;56(5):477-483.",
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Global singleton state container
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -520,6 +569,17 @@ class AppState:
             "Lt. Cdr. P. Nair (Flight Engineer)",
             "Dr. V. Rao (Mission Specialist)",
         ]
+
+    def calculate_co2_headache_hazard(self, co2_mmhg: Optional[float] = None) -> Dict[str, Any]:
+        """
+        Calculate Dr. Law (2014) CO2-headache hazard model odds ratio and risk.
+        Reference:
+            Law J, Watkins S, Alexander D. Relationship Between Carbon Dioxide
+            Levels and Reported Headaches on the International Space Station.
+            J Occup Environ Med. 2014;56(5):477-483.
+        """
+        val = self.cabin_co2 if co2_mmhg is None else co2_mmhg
+        return calculate_law2014_headache_odds(val)
 
     # ── Convenience helpers ────────────────────────────────────────────────────
 

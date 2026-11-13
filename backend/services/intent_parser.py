@@ -87,6 +87,38 @@ INTENT_PATTERNS: Dict[str, List[str]] = {
     "confirm_critical": [
         "confirm override", "confirm emergency reset", "yes confirm", "confirm reset",
     ],
+    "start_pvt": [
+        "start pvt test", "start pvt", "pvt test", "begin pvt", "start reaction test",
+        "reaction test", "run pvt", "begin reaction test",
+    ],
+    "stop_pvt": [
+        "stop pvt", "stop pvt test", "cancel pvt", "abort pvt", "stop reaction test",
+        "end pvt", "abort reaction test",
+    ],
+    "screener_depression": [
+        "start depression check", "depression check", "start phq9", "phq9 check",
+        "depression screener", "start phq 9", "phq 9 check", "run phq9",
+    ],
+    "screener_anxiety": [
+        "start anxiety check", "anxiety check", "start gad7", "gad7 check",
+        "anxiety screener", "start gad 7", "gad 7 check", "run gad7",
+    ],
+    "checklist_ammonia": [
+        "checklist ammonia", "ammonia checklist", "ammonia leak checklist",
+        "emergency ammonia", "open ammonia checklist", "ammonia emergency",
+    ],
+    "checklist_trauma": [
+        "checklist trauma", "trauma checklist", "acute trauma checklist",
+        "emergency trauma", "open trauma checklist", "trauma emergency",
+    ],
+    "navigate_clinical": [
+        "open clinical", "show clinical", "clinical panel", "go to clinical",
+        "switch to clinical", "clinical view", "clinical dashboard",
+    ],
+    "navigate_sleep": [
+        "open sleep", "show sleep", "circadian tracker", "go to sleep view",
+        "switch to sleep", "sleep panel", "circadian panel",
+    ],
 }
 
 WAKE_WORDS = ["maitri", "matri", "maytri", "maitre", "matrix", "may tree", "my tree", "nightly", "mighty"]
