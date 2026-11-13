@@ -196,11 +196,41 @@ class AlarmManager:
     - 120-second clinical audio pause/mute (clause 6.8.4)
     - 3-minute (180s) auto-escalation of unacknowledged alarms
     """
-    def __init__(self):
+    def __init__(self, db_path: Optional[str] = None):
         self.active_alarms: Dict[str, AlarmEvent] = {}  # key: code
         self.alarm_history: List[AlarmEvent] = []
         self.audio_pause_until: float = 0.0
         self.counter: int = 0
+        self.db_path: Optional[str] = db_path
+
+    def _persist_alarm_event(self, alarm: AlarmEvent, status: str, db_path: Optional[str] = None) -> None:
+        try:
+            import datetime
+            from modules.database_module import log_alarm_event
+            target_path = db_path or self.db_path
+            ack_str = (
+                datetime.datetime.fromtimestamp(alarm.ack_timestamp).strftime("%Y-%m-%d %H:%M:%S")
+                if alarm.ack_timestamp else None
+            )
+            res_str = (
+                datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                if status == "RESOLVED" else None
+            )
+            log_alarm_event(
+                alarm_id=alarm.alarm_id,
+                priority=alarm.priority,
+                code=alarm.code,
+                message=alarm.message,
+                source=alarm.source,
+                status=status,
+                acknowledged_at=ack_str,
+                resolved_at=res_str,
+                escalated_from=alarm.original_priority if alarm.escalated else None,
+                occurrence_count=alarm.occurrence_count,
+                db_path=target_path,
+            )
+        except Exception:
+            pass
 
     def pause_audio(self, duration_sec: float = 120.0) -> float:
         """Pause clinical alarm audio for 120 seconds (IEC 60601-1-8 clause 6.8.4)."""
@@ -248,6 +278,7 @@ class AlarmManager:
         )
         self.active_alarms[code] = alarm
         self.alarm_history.insert(0, alarm)
+        self._persist_alarm_event(alarm, "ACTIVE")
         return alarm
 
     def acknowledge_alarm(self, code_or_id: str, ack_by: str = "crew") -> Optional[AlarmEvent]:
@@ -265,6 +296,7 @@ class AlarmManager:
             target.acknowledged = True
             target.ack_timestamp = now
             target.ack_by = ack_by
+            self._persist_alarm_event(target, "ACKNOWLEDGED")
             return target
         return None
 
@@ -284,6 +316,7 @@ class AlarmManager:
         if target and code_key:
             target.active = False
             del self.active_alarms[code_key]
+            self._persist_alarm_event(target, "RESOLVED")
             return target
         return None
 
@@ -310,6 +343,7 @@ class AlarmManager:
                         alarm.priority = "HIGH"
                     # HIGH remains HIGH, flagged escalated
                     escalated_list.append(alarm)
+                    self._persist_alarm_event(alarm, "ESCALATED")
 
         return escalated_list
 
@@ -433,6 +467,10 @@ class AppState:
         self.heart_rate: float = 75.0
         self.temperature: float = 36.6
         self.spo2: float = 98.0
+        self.manual_respiratory_rate: Optional[float] = None
+        self.manual_rmssd: Optional[float] = None
+        self.manual_sdnn: Optional[float] = None
+        self.manual_baevsky_index: Optional[float] = None
         self.respiratory_rate: float = 14.0
         self.rmssd: float = 42.0
         self.sdnn: float = 55.0
@@ -491,6 +529,26 @@ class AppState:
     def get_db_path(self) -> str:
         """Return absolute path to the SQLite DB file."""
         return str(_PROJECT_ROOT / "maitri_logs.db")
+
+    def sync_hash_chain(self, db_path: Optional[str] = None) -> None:
+        """Sync in-memory AuditHashChain with latest hash & count from SQLite."""
+        try:
+            import sqlite3
+            path = db_path or self.get_db_path()
+            if os.path.exists(path):
+                conn = sqlite3.connect(path)
+                c = conn.cursor()
+                c.execute("SELECT record_hash FROM stress_logs WHERE record_hash IS NOT NULL AND record_hash != '' ORDER BY id DESC LIMIT 1")
+                row = c.fetchone()
+                if row and row[0]:
+                    self.hash_chain.current_hash = row[0]
+                c.execute("SELECT COUNT(*) FROM stress_logs")
+                cnt_row = c.fetchone()
+                if cnt_row:
+                    self.hash_chain.entry_count = cnt_row[0]
+                conn.close()
+        except Exception:
+            pass
 
 
 # Global singleton — imported by all backend modules

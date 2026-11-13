@@ -38,6 +38,15 @@ class LogEntryRequest(BaseModel):
     prob_neutral: Optional[float] = None
     prob_sad: Optional[float] = None
     prob_surprise: Optional[float] = None
+    rmssd: Optional[float] = 42.0
+    sdnn: Optional[float] = 55.0
+    baevsky_index: Optional[float] = 95.0
+    respiratory_rate: Optional[float] = 14.0
+    co2_mmhg: Optional[float] = 3.0
+    o2_percent: Optional[float] = 20.9
+    pressure_kpa: Optional[float] = 101.3
+    ambient_temp_c: Optional[float] = 22.0
+    noise_dba: Optional[float] = 58.0
 
 
 @router.get("")
@@ -75,7 +84,7 @@ async def post_log(entry: LogEntryRequest):
         if not probs:
             probs = None
 
-        log_event(
+        prev_h, rec_h = log_event(
             face_emotion=entry.face_emotion,
             fused_emotion=entry.fused_emotion,
             voice_state=entry.voice_state,
@@ -89,10 +98,62 @@ async def post_log(entry: LogEntryRequest):
             alert_triggered=entry.alert_triggered,
             response_msg=entry.response_msg,
             emotion_probs=probs,
+            rmssd=entry.rmssd if entry.rmssd is not None else 42.0,
+            sdnn=entry.sdnn if entry.sdnn is not None else 55.0,
+            baevsky_index=entry.baevsky_index if entry.baevsky_index is not None else 95.0,
+            respiratory_rate=entry.respiratory_rate if entry.respiratory_rate is not None else 14.0,
+            co2_mmhg=entry.co2_mmhg if entry.co2_mmhg is not None else 3.0,
+            o2_percent=entry.o2_percent if entry.o2_percent is not None else 20.9,
+            pressure_kpa=entry.pressure_kpa if entry.pressure_kpa is not None else 101.3,
+            ambient_temp_c=entry.ambient_temp_c if entry.ambient_temp_c is not None else 22.0,
+            noise_dba=entry.noise_dba if entry.noise_dba is not None else 58.0,
         )
-        return {"status": "logged"}
+        state = get_state()
+        if hasattr(state, "hash_chain"):
+            state.hash_chain.current_hash = rec_h
+            state.hash_chain.entry_count += 1
+        return {"status": "logged", "record_hash": rec_h, "prev_hash": prev_h}
     except Exception as exc:
         logger.error("post_log error: %s", exc)
+        return {"status": "error", "detail": str(exc)}
+
+
+@router.get("/alarms")
+async def get_alarm_logs(
+    limit: int = Query(default=100, ge=1, le=1000),
+):
+    """Return IEC 60601-1-8 alarm events ledger from SQLite."""
+    try:
+        import pandas as pd
+        from modules.database_module import get_alarm_events
+        df = get_alarm_events(limit=limit)
+        records = [
+            {k: (None if pd.isna(v) else v) for k, v in r.items()}
+            for r in df.to_dict(orient="records")
+        ] if not df.empty else []
+        return {
+            "total": len(df),
+            "records": records,
+        }
+    except Exception as exc:
+        logger.error("get_alarm_logs error: %s", exc)
+        return {"total": 0, "records": [], "error": str(exc)}
+
+
+@router.get("/verify_chain")
+async def verify_chains():
+    """Verify cryptographic SHA-256 hash chains for telemetry and alarm logs."""
+    try:
+        from modules.database_module import verify_stress_logs_hash_chain, verify_alarm_events_hash_chain
+        stress_valid, stress_err_idx = verify_stress_logs_hash_chain()
+        alarm_valid, alarm_err_idx = verify_alarm_events_hash_chain()
+        return {
+            "status": "verified" if (stress_valid and alarm_valid) else "corrupted",
+            "stress_logs": {"valid": stress_valid, "failing_id": stress_err_idx},
+            "alarm_events": {"valid": alarm_valid, "failing_id": alarm_err_idx},
+        }
+    except Exception as exc:
+        logger.error("verify_chains error: %s", exc)
         return {"status": "error", "detail": str(exc)}
 
 

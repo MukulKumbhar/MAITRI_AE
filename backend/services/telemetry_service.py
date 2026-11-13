@@ -39,10 +39,10 @@ def _build_telemetry_payload(state) -> Dict[str, Any]:
         state.heart_rate = sim["heart_rate"]
         state.temperature = sim["temperature"]
         state.spo2 = sim["spo2"]
-        state.respiratory_rate = sim["respiratory_rate"]
-        state.rmssd = sim["rmssd"]
-        state.sdnn = sim["sdnn"]
-        state.baevsky_index = sim["baevsky_index"]
+        state.manual_respiratory_rate = sim["respiratory_rate"]
+        state.manual_rmssd = sim["rmssd"]
+        state.manual_sdnn = sim["sdnn"]
+        state.manual_baevsky_index = sim["baevsky_index"]
         state.cabin_co2 = sim["co2_mmhg"]
         state.cabin_o2 = sim["o2_percent"]
         state.cabin_pressure = sim["pressure_kpa"]
@@ -58,11 +58,15 @@ def _build_telemetry_payload(state) -> Dict[str, Any]:
         heart_rate=state.heart_rate,
         temperature=state.temperature,
         spo2=state.spo2,
-        respiratory_rate=getattr(state, "respiratory_rate", None),
-        rmssd=getattr(state, "rmssd", None),
-        sdnn=getattr(state, "sdnn", None),
-        baevsky_index=getattr(state, "baevsky_index", None),
+        respiratory_rate=getattr(state, "manual_respiratory_rate", None),
+        rmssd=getattr(state, "manual_rmssd", None),
+        sdnn=getattr(state, "manual_sdnn", None),
+        baevsky_index=getattr(state, "manual_baevsky_index", None),
     )
+    state.respiratory_rate = vitals_result.respiratory_rate
+    state.rmssd = vitals_result.rmssd
+    state.sdnn = vitals_result.sdnn
+    state.baevsky_index = vitals_result.baevsky_index
 
     # ── 4. Multimodal fusion with Personal Baseline & Explainability ──────
     fusion_result = fuse(
@@ -140,7 +144,7 @@ def _build_telemetry_payload(state) -> Dict[str, Any]:
     # ── 8. Auto-log if enabled with cryptographic chaining ────────────────
     if state.auto_log_enabled:
         try:
-            log_event(
+            prev_h, rec_h = log_event(
                 face_emotion=face_snap["face_emotion"],
                 fused_emotion=fusion_result.dominant_emotion,
                 voice_state="speaking" if voice_snap["is_speaking"] else "silent",
@@ -164,6 +168,9 @@ def _build_telemetry_payload(state) -> Dict[str, Any]:
                 ambient_temp_c=getattr(state, "cabin_temp", 22.0),
                 noise_dba=getattr(state, "cabin_noise", 58.0),
             )
+            if hasattr(state, "hash_chain"):
+                state.hash_chain.current_hash = rec_h
+                state.hash_chain.entry_count += 1
         except Exception as exc:
             logger.debug("Auto-log error: %s", exc)
 

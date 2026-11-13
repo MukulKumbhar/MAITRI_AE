@@ -53,6 +53,7 @@ from backend.api.psych import router as psych_router
 from backend.api.mission import router as mission_router
 from backend.api.watchdog import router as watchdog_router
 from backend.api.settings import router as settings_router
+from backend.api.clinical import router as clinical_router
 
 from backend.ws.telemetry import router as telemetry_ws_router
 from backend.ws.audio import router as audio_ws_router
@@ -82,6 +83,7 @@ async def lifespan(app: FastAPI):
         elif db_mod.DB_FILE == "maitri_logs.db":
             db_mod.DB_FILE = str(_PROJECT_ROOT / "maitri_logs.db")
         init_db()
+        state.sync_hash_chain(db_mod.DB_FILE)
         logger.info("✅ SQLite database initialized: %s", db_mod.DB_FILE)
     except Exception as exc:
         logger.error("❌ Database init error: %s", exc)
@@ -150,6 +152,7 @@ app.include_router(psych_router)
 app.include_router(mission_router)
 app.include_router(watchdog_router)
 app.include_router(settings_router)
+app.include_router(clinical_router)
 
 # ── Register WebSocket routers ────────────────────────────────────────────────
 app.include_router(telemetry_ws_router)

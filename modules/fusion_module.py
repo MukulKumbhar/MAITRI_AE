@@ -108,6 +108,12 @@ class PersonalBaseline:
     sigma_vitals_strain: float = 0.08
     sigma_face_strain: float = 0.05
 
+    # Welford's algorithm second moment accumulators (M2 = sum((x - mean)^2))
+    m2_negative_affect: float = 0.0
+    m2_ear: float = 0.0
+    m2_vitals_strain: float = 0.0
+    m2_face_strain: float = 0.0
+
     # Baseline emotion probability offsets (cephalic fluid shift offsets)
     baseline_emotion_offsets: Dict[str, float] = field(default_factory=lambda: {
         "angry": 0.0, "disgust": 0.0, "fear": 0.0,
@@ -159,10 +165,28 @@ class PersonalBaseline:
                 old_m = self.baseline_emotion_offsets.get(e, 0.0)
                 self.baseline_emotion_offsets[e] = old_m + (val - old_m) / n
 
-        self.mu_negative_affect += (neg - self.mu_negative_affect) / n
-        self.mu_vitals_strain += (vitals_strain - self.mu_vitals_strain) / n
-        self.mu_ear += (ear - self.mu_ear) / n
-        self.mu_face_strain += (fatigue_strain - self.mu_face_strain) / n
+        # Welford's algorithm for online mean and variance
+        delta_neg = neg - self.mu_negative_affect
+        self.mu_negative_affect += delta_neg / n
+        self.m2_negative_affect += delta_neg * (neg - self.mu_negative_affect)
+
+        delta_vit = vitals_strain - self.mu_vitals_strain
+        self.mu_vitals_strain += delta_vit / n
+        self.m2_vitals_strain += delta_vit * (vitals_strain - self.mu_vitals_strain)
+
+        delta_ear = ear - self.mu_ear
+        self.mu_ear += delta_ear / n
+        self.m2_ear += delta_ear * (ear - self.mu_ear)
+
+        delta_face = fatigue_strain - self.mu_face_strain
+        self.mu_face_strain += delta_face / n
+        self.m2_face_strain += delta_face * (fatigue_strain - self.mu_face_strain)
+
+        if n > 1:
+            self.sigma_negative_affect = max(0.01, math.sqrt(self.m2_negative_affect / (n - 1.0)))
+            self.sigma_vitals_strain = max(0.01, math.sqrt(self.m2_vitals_strain / (n - 1.0)))
+            self.sigma_ear = max(0.01, math.sqrt(self.m2_ear / (n - 1.0)))
+            self.sigma_face_strain = max(0.01, math.sqrt(self.m2_face_strain / (n - 1.0)))
 
         if self.sample_count >= self.calibration_target:
             self.is_calibrated = True
@@ -249,6 +273,7 @@ class FusionState:
     last_emotion:   str   = "neutral"
     last_stress:    float = 0.0
     initialized:    bool  = False
+    frame_count:    int   = 0
     baseline:       PersonalBaseline = field(default_factory=PersonalBaseline)
 
 
@@ -454,9 +479,12 @@ def fuse(
     state.last_stress  = stress_pct
 
     # ── 8. CUSUM Drift & Explainable Clinical Breakdown ───────────────────
-    state.baseline.update_cusum("negative_affect", neg_score)
-    state.baseline.update_cusum("vitals_strain", vitals_strain)
-    state.baseline.update_cusum("face_strain", fatigue_strain)
+    state.frame_count += 1
+    # Run CUSUM update on initial frame and at 1 Hz intervals (every 10 frames at 10 Hz)
+    if state.frame_count == 1 or state.frame_count % 10 == 0:
+        state.baseline.update_cusum("negative_affect", neg_score)
+        state.baseline.update_cusum("vitals_strain", vitals_strain)
+        state.baseline.update_cusum("face_strain", fatigue_strain)
 
     rationales: List[str] = []
     # Behavioral rationale

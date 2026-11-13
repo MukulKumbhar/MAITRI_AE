@@ -191,9 +191,10 @@ def log_event(
     canonical_payload = (
         f"{timestamp}|{face_emotion}|{fused_emotion}|{voice_state}|"
         f"{heart_rate:.1f}|{temperature:.2f}|{spo2:.1f}|{blink_rate:.1f}|{fatigue_label}|"
-        f"{stress_score:.1f}|{stress_level}|{rmssd:.1f}|{sdnn:.1f}|{baevsky_index:.1f}|"
-        f"{respiratory_rate:.1f}|{co2_mmhg:.2f}|{o2_percent:.2f}|{pressure_kpa:.1f}|"
-        f"{ambient_temp_c:.1f}|{noise_dba:.1f}"
+        f"{stress_score:.1f}|{stress_level}|{alert_triggered or ''}|{response_msg or ''}|"
+        f"{p_angry:.3f}|{p_disgust:.3f}|{p_fear:.3f}|{p_happy:.3f}|{p_neutral:.3f}|{p_sad:.3f}|{p_surprise:.3f}|"
+        f"{rmssd:.1f}|{sdnn:.1f}|{baevsky_index:.1f}|{respiratory_rate:.1f}|"
+        f"{co2_mmhg:.2f}|{o2_percent:.2f}|{pressure_kpa:.1f}|{ambient_temp_c:.1f}|{noise_dba:.1f}"
     )
     record_hash = compute_telemetry_hash(prev_hash, canonical_payload)
 
@@ -258,7 +259,9 @@ def verify_stress_logs_hash_chain(db_path: Optional[str] = None) -> Tuple[bool, 
     c.execute(
         """SELECT id, prev_hash, record_hash, timestamp, face_emotion, fused_emotion,
                   voice_state, heart_rate, temperature, spo2, blink_rate, fatigue_label,
-                  stress_score, stress_level, rmssd, sdnn, baevsky_index, respiratory_rate,
+                  stress_score, stress_level, alert_triggered, response_msg,
+                  prob_angry, prob_disgust, prob_fear, prob_happy, prob_neutral, prob_sad, prob_surprise,
+                  rmssd, sdnn, baevsky_index, respiratory_rate,
                   co2_mmhg, o2_percent, pressure_kpa, ambient_temp_c, noise_dba
            FROM stress_logs ORDER BY id ASC"""
     )
@@ -283,9 +286,12 @@ def verify_stress_logs_hash_chain(db_path: Optional[str] = None) -> Tuple[bool, 
         canonical_payload = (
             f"{r[3]}|{r[4]}|{r[5]}|{r[6]}|"
             f"{float(r[7]):.1f}|{float(r[8]):.2f}|{float(r[9]):.1f}|{float(r[10]):.1f}|{r[11]}|"
-            f"{float(r[12]):.1f}|{r[13]}|{float(r[14]):.1f}|{float(r[15]):.1f}|{float(r[16]):.1f}|"
-            f"{float(r[17]):.1f}|{float(r[18]):.2f}|{float(r[19]):.2f}|{float(r[20]):.1f}|"
-            f"{float(r[21]):.1f}|{float(r[22]):.1f}"
+            f"{float(r[12]):.1f}|{r[13]}|{r[14] or ''}|{r[15] or ''}|"
+            f"{float(r[16] or 0.0):.3f}|{float(r[17] or 0.0):.3f}|{float(r[18] or 0.0):.3f}|{float(r[19] or 0.0):.3f}|"
+            f"{float(r[20] or 0.0):.3f}|{float(r[21] or 0.0):.3f}|{float(r[22] or 0.0):.3f}|"
+            f"{float(r[23] or 42.0):.1f}|{float(r[24] or 55.0):.1f}|{float(r[25] or 95.0):.1f}|"
+            f"{float(r[26] or 14.0):.1f}|{float(r[27] or 3.0):.2f}|{float(r[28] or 20.9):.2f}|{float(r[29] or 101.3):.1f}|"
+            f"{float(r[30] or 22.0):.1f}|{float(r[31] or 58.0):.1f}"
         )
         computed = compute_telemetry_hash(actual_prev, canonical_payload)
         if computed != actual_hash:
@@ -324,7 +330,10 @@ def log_alarm_event(
     row = c.fetchone()
     prev_hash = row[0] if (row and row[0]) else GENESIS_HASH
 
-    canonical = f"{timestamp}|{alarm_id}|{priority}|{code}|{message}|{source}|{status}|{occurrence_count}"
+    canonical = (
+        f"{timestamp}|{alarm_id}|{priority}|{code}|{message}|{source}|{status}|"
+        f"{acknowledged_at or ''}|{resolved_at or ''}|{escalated_from or ''}|{occurrence_count}"
+    )
     record_hash = compute_telemetry_hash(prev_hash, canonical)
 
     c.execute(
@@ -364,7 +373,7 @@ def verify_alarm_events_hash_chain(db_path: Optional[str] = None) -> Tuple[bool,
     c = conn.cursor()
     c.execute(
         """SELECT id, prev_hash, record_hash, timestamp, alarm_id, priority, code,
-                  message, source, status, occurrence_count
+                  message, source, status, acknowledged_at, resolved_at, escalated_from, occurrence_count
            FROM alarm_events ORDER BY id ASC"""
     )
     rows = c.fetchall()
@@ -385,7 +394,10 @@ def verify_alarm_events_hash_chain(db_path: Optional[str] = None) -> Tuple[bool,
         if actual_prev != expected_prev:
             return False, rec_id
 
-        canonical = f"{r[3]}|{r[4]}|{r[5]}|{r[6]}|{r[7]}|{r[8]}|{r[9]}|{r[10]}"
+        canonical = (
+            f"{r[3]}|{r[4]}|{r[5]}|{r[6]}|{r[7]}|{r[8]}|{r[9]}|"
+            f"{r[10] or ''}|{r[11] or ''}|{r[12] or ''}|{r[13]}"
+        )
         computed = compute_telemetry_hash(actual_prev, canonical)
         if computed != actual_hash:
             return False, rec_id

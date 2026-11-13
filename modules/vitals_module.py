@@ -146,7 +146,17 @@ def calculate_hrv_metrics(rr_intervals_ms: Sequence[float]) -> Dict[str, float]:
     - mx_dmn: Variation range MxDMn (seconds) [Baevsky 1984]
     - baevsky_index: Baevsky Stress Index SI = AMo / (2 * Mo * MxDMn)
     """
-    cleaned = [float(rr) for rr in rr_intervals_ms if rr > 200.0 and rr < 2500.0]
+    cleaned: List[float] = []
+    if rr_intervals_ms:
+        for rr in rr_intervals_ms:
+            if rr is None:
+                continue
+            try:
+                val = float(rr)
+                if 200.0 < val < 2500.0:
+                    cleaned.append(val)
+            except (ValueError, TypeError):
+                continue
     n = len(cleaned)
 
     if n < 2:
@@ -372,6 +382,9 @@ def compute_vitals_strain(
 
     if rr_intervals is not None or rmssd is not None or baevsky_index is not None:
         vitals_strain = _clamp(0.75 * base_vitals_strain + 0.25 * hrv_strain)
+        # Prevent dilution of severe acute emergencies (e.g. hypoxic distress / extreme tachycardia)
+        if base_vitals_strain >= 0.70:
+            vitals_strain = max(vitals_strain, base_vitals_strain * 0.90)
     else:
         vitals_strain = base_vitals_strain
 

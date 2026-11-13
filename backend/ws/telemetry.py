@@ -85,14 +85,22 @@ async def _handle_client_message(msg: dict, state) -> None:
             from modules.database_module import log_event
             from modules.vitals_module import compute_vitals_strain
             from modules.alert_module import get_alert
-            vitals = compute_vitals_strain(state.heart_rate, state.temperature, state.spo2)
+            vitals = compute_vitals_strain(
+                heart_rate=state.heart_rate,
+                temperature=state.temperature,
+                spo2=state.spo2,
+                respiratory_rate=getattr(state, "manual_respiratory_rate", None),
+                rmssd=getattr(state, "manual_rmssd", None),
+                sdnn=getattr(state, "manual_sdnn", None),
+                baevsky_index=getattr(state, "manual_baevsky_index", None),
+            )
             face_snap = state.live.snapshot_face()
             alert = get_alert(
                 stress_pct=state.fusion.last_stress,
                 dominant_emotion=state.fusion.last_emotion,
                 fatigue_label=face_snap["fatigue_label"],
             )
-            log_event(
+            prev_h, rec_h = log_event(
                 face_emotion=face_snap["face_emotion"],
                 fused_emotion=state.fusion.last_emotion,
                 voice_state="speaking" if state.live.is_speaking else "silent",
@@ -106,9 +114,57 @@ async def _handle_client_message(msg: dict, state) -> None:
                 alert_triggered=alert.header,
                 response_msg=alert.body,
                 emotion_probs=dict(state.fusion.ema_probs),
+                rmssd=vitals.rmssd,
+                sdnn=vitals.sdnn,
+                baevsky_index=vitals.baevsky_index,
+                respiratory_rate=vitals.respiratory_rate,
+                co2_mmhg=getattr(state, "cabin_co2", 3.0),
+                o2_percent=getattr(state, "cabin_o2", 20.9),
+                pressure_kpa=getattr(state, "cabin_pressure", 101.3),
+                ambient_temp_c=getattr(state, "cabin_temp", 22.0),
+                noise_dba=getattr(state, "cabin_noise", 58.0),
             )
+            if hasattr(state, "hash_chain"):
+                state.hash_chain.current_hash = rec_h
+                state.hash_chain.entry_count += 1
         except Exception as exc:
             logger.warning("Manual log error: %s", exc)
+
+    elif action in ("alarm_ack", "acknowledge_alarm"):
+        code_or_id = msg.get("code") or msg.get("alarm_id", "")
+        ack_by = msg.get("ack_by", "crew")
+        if hasattr(state, "alarm_manager") and code_or_id:
+            state.alarm_manager.acknowledge_alarm(code_or_id, ack_by=ack_by)
+
+    elif action in ("alarm_mute", "alarm_pause", "pause_audio"):
+        duration = float(msg.get("duration", 120.0))
+        if hasattr(state, "alarm_manager"):
+            state.alarm_manager.pause_audio(duration_sec=duration)
+
+    elif action in ("alarm_resolve", "resolve_alarm"):
+        code_or_id = msg.get("code") or msg.get("alarm_id", "")
+        if hasattr(state, "alarm_manager") and code_or_id:
+            state.alarm_manager.resolve_alarm(code_or_id)
+
+    elif action == "set_sensor_mode":
+        mode = msg.get("mode", "manual")
+        if hasattr(state, "sensor_adapter"):
+            state.sensor_adapter.set_mode(mode)
+
+    elif action == "set_simulation_scenario":
+        scenario = msg.get("scenario", "nominal_flight")
+        if hasattr(state, "sensor_adapter"):
+            state.sensor_adapter.set_scenario(scenario)
+
+    elif action == "calibrate_baseline":
+        face_snap = state.live.snapshot_face()
+        if hasattr(state, "fusion") and hasattr(state.fusion, "baseline"):
+            state.fusion.baseline.calibrate_step(
+                face_probs=face_snap.get("emotion_probs"),
+                vitals_strain=0.10,
+                ear=face_snap.get("ear", 0.28),
+                fatigue_strain=face_snap.get("fatigue_strain", 0.0),
+            )
 
     elif action == "watchdog_ack":
         state.watchdog.acknowledge()

@@ -174,6 +174,13 @@ class TestCardioRespiratoryAndHRV:
         outlier_res = calculate_hrv_metrics([50.0, 800.0, 820.0, 5000.0])
         assert outlier_res["mean_rr"] == pytest.approx(810.0, abs=5.0)
 
+    def test_hrv_robust_to_none_and_corrupt_types(self):
+        """Verify HRV metrics gracefully ignore None, strings, and non-numeric entries."""
+        res = calculate_hrv_metrics([800.0, None, "corrupt", 820.0, 790.0, 810.0, 805.0])
+        assert res["sdnn"] > 0.0
+        assert res["rmssd"] > 0.0
+        assert res["baevsky_index"] > 0.0
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. Personal Baseline Calibration & CUSUM Drift Detection
@@ -193,6 +200,18 @@ class TestPersonalBaselineAndCUSUM:
         assert pb.is_calibrated
         assert pb.mu_ear == pytest.approx(0.29, abs=0.01)
         assert pb.mu_vitals_strain == pytest.approx(0.15, abs=0.01)
+
+    def test_welford_variance_and_sigma_calibration(self):
+        """Verify Welford's algorithm calculates sample standard deviation (sigma) during calibration."""
+        pb = PersonalBaseline(calibration_target=5)
+        # Sequence with known sample mean and variance
+        # vitals_strains: 0.10, 0.20, 0.10, 0.20 -> mean = 0.15, s = 0.0577...
+        for val in [0.10, 0.20, 0.10, 0.20]:
+            pb.calibrate_step(face_probs=None, vitals_strain=val)
+
+        assert pb.sample_count == 4
+        assert pb.mu_vitals_strain == pytest.approx(0.15, abs=0.01)
+        assert pb.sigma_vitals_strain == pytest.approx(0.0577, abs=0.01)
 
     def test_z_score_calculation(self):
         """Verify standard normal deviation Z = (x - mu) / sigma."""
@@ -542,6 +561,28 @@ class TestDatabaseAndAuditHashChain:
         assert is_valid_after is False
         assert fail_rec_id == 1
 
+    def test_telemetry_hash_chain_detects_alert_and_probability_tampering(self, test_db):
+        """Verify tampering of alert_triggered or emotion probability distribution is detected."""
+        db_mod.log_event(
+            face_emotion="neutral", fused_emotion="neutral", voice_state="silent",
+            heart_rate=70.0, temperature=36.6, spo2=98.0, blink_rate=14.0,
+            fatigue_label="Normal", stress_score=15.0, stress_level="NOMINAL",
+            alert_triggered="Nominal", response_msg="Optimal", db_path=test_db,
+            emotion_probs={"neutral": 0.9, "happy": 0.1}
+        )
+        is_valid, _ = db_mod.verify_stress_logs_hash_chain(test_db)
+        assert is_valid is True
+
+        # Tamper alert_triggered
+        conn = sqlite3.connect(test_db)
+        conn.cursor().execute("UPDATE stress_logs SET alert_triggered='CRITICAL_BREACH' WHERE id=1")
+        conn.commit()
+        conn.close()
+
+        is_valid_tampered, fail_id = db_mod.verify_stress_logs_hash_chain(test_db)
+        assert is_valid_tampered is False
+        assert fail_id == 1
+
     def test_alarm_events_cryptographic_hash_chain(self, test_db):
         """Verify IEC 60601-1-8 alarm events ledger forms a verifiable hash chain."""
         p1, h1 = db_mod.log_alarm_event(
@@ -570,6 +611,52 @@ class TestDatabaseAndAuditHashChain:
         is_valid_tampered, fail_id = db_mod.verify_alarm_events_hash_chain(test_db)
         assert is_valid_tampered is False
         assert fail_id == 1
+
+    def test_alarm_events_detects_acknowledgment_tampering(self, test_db):
+        """Verify tampering with alarm acknowledgment metadata is detected by hash verification."""
+        p1, h1 = db_mod.log_alarm_event(
+            alarm_id="ALM_001", priority="HIGH", code="HR_HIGH",
+            message="Heart rate 135 BPM", db_path=test_db,
+            status="ACKNOWLEDGED", acknowledged_at="2026-11-13 12:05:00"
+        )
+        is_valid, _ = db_mod.verify_alarm_events_hash_chain(test_db)
+        assert is_valid is True
+
+        conn = sqlite3.connect(test_db)
+        conn.cursor().execute("UPDATE alarm_events SET acknowledged_at='2026-11-13 12:00:00' WHERE id=1")
+        conn.commit()
+        conn.close()
+
+        is_valid_tamp, fail_id = db_mod.verify_alarm_events_hash_chain(test_db)
+        assert is_valid_tamp is False
+        assert fail_id == 1
+
+    def test_alarm_manager_auto_persists_to_sqlite_ledger(self, test_db):
+        """Verify AlarmManager writes alarm lifecycle events to SQLite alarm_events table."""
+        mgr = AlarmManager(db_path=test_db)
+        # 1. Raise alarm
+        a = mgr.raise_alarm("HR_HIGH_CRITICAL", "HIGH", "Tachycardia 132 BPM")
+        df = db_mod.get_alarm_events(db_path=test_db)
+        assert len(df) == 1
+        assert df.iloc[0]["code"] == "HR_HIGH_CRITICAL"
+        assert df.iloc[0]["status"] == "ACTIVE"
+
+        # 2. Acknowledge alarm
+        mgr.acknowledge_alarm("HR_HIGH_CRITICAL", ack_by="Cdr. Sharma")
+        df2 = db_mod.get_alarm_events(db_path=test_db)
+        assert len(df2) == 2
+        assert df2.iloc[0]["status"] == "ACKNOWLEDGED"
+
+        # 3. Resolve alarm
+        mgr.resolve_alarm("HR_HIGH_CRITICAL")
+        df3 = db_mod.get_alarm_events(db_path=test_db)
+        assert len(df3) == 3
+        assert df3.iloc[0]["status"] == "RESOLVED"
+
+        # Verify hash chain across entire lifecycle
+        valid, fail_id = db_mod.verify_alarm_events_hash_chain(test_db)
+        assert valid is True
+        assert fail_id is None
 
     def test_verify_empty_db_hash_chain(self, test_db):
         """Verify empty database returns valid hash chain with no errors."""
@@ -644,4 +731,130 @@ class TestHardwareSensorAdapterAndAuditChain:
         valid_tampered, fail_idx = AuditHashChain.verify_chain(records)
         assert valid_tampered is False
         assert fail_idx == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. Dynamic Cardio-Respiratory Telemetry & Clinical API Integration
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestClinicalDynamicVitalsAndAPI:
+    def test_telemetry_dynamic_vitals_under_tachycardia_hypoxia(self):
+        """Verify dynamic vitals and HRV calculation under tachycardia and hypoxia in manual/live mode."""
+        from backend.state import AppState
+        from backend.services.telemetry_service import _build_telemetry_payload
+
+        s = AppState()
+        s.heart_rate = 135.0
+        s.temperature = 39.0
+        s.spo2 = 85.0
+
+        payload = _build_telemetry_payload(s)
+        v = payload["vitals"]
+
+        assert v["heart_rate"] == 135.0
+        # Coupled respiration should reflect tachypnea (> 18 breaths/min)
+        assert v["respiratory_rate"] > 18.0
+        # Autonomic vagal withdrawal (rMSSD < 25ms)
+        assert v["rmssd"] < 25.0
+        # High sympathetic exhaustion
+        assert v["baevsky_index"] > 150.0
+        assert v["composite_strain"] >= 0.70
+        assert v["status"] == "Critical"
+
+        # Automated IEC 60601-1-8 alarms raised
+        alarms = payload["alarms"]
+        assert alarms["high_count"] >= 1
+        assert "HR_HIGH_CRITICAL" in s.alarm_manager.active_alarms
+
+    def test_clinical_rest_endpoints(self):
+        """Verify REST API contracts for alarms, sensor adapter mode, and hash chain verification."""
+        from fastapi.testclient import TestClient
+        from backend.main import app
+        from backend.state import reset_state
+
+        reset_state()
+        client = TestClient(app)
+
+        # 1. Alarms status
+        resp = client.get("/api/clinical/alarms")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "summary" in data
+        assert "active" in data
+
+        # 2. Trigger alarm directly on state then acknowledge via REST
+        state = app.state if hasattr(app, "state") and hasattr(app.state, "alarm_manager") else None
+        from backend.state import get_state
+        state = get_state()
+        state.alarm_manager.raise_alarm("TEST_ALM", "HIGH", "Test critical alarm")
+
+        ack_resp = client.post("/api/clinical/alarms/ack", json={"code_or_id": "TEST_ALM", "ack_by": "Flight Surgeon"})
+        assert ack_resp.status_code == 200
+        assert ack_resp.json()["status"] == "acknowledged"
+
+        # 3. 120s clinical audio pause
+        pause_resp = client.post("/api/clinical/alarms/pause", json={"duration_sec": 120.0})
+        assert pause_resp.status_code == 200
+        assert pause_resp.json()["status"] == "paused"
+        assert pause_resp.json()["remaining_sec"] > 115.0
+
+        # 4. Sensor adapter mode & scenario
+        mode_resp = client.post("/api/clinical/sensors/mode", json={"mode": "replay"})
+        assert mode_resp.status_code == 200
+        assert mode_resp.json()["mode"] == "replay"
+
+        scen_resp = client.post("/api/clinical/sensors/scenario", json={"scenario": "co2_retention", "replay_speed": 2.0})
+        assert scen_resp.status_code == 200
+        assert scen_resp.json()["scenario"] == "co2_retention"
+
+        # 5. Alarm events ledger & cryptographic verification
+        ledger_resp = client.get("/api/logs/alarms")
+        assert ledger_resp.status_code == 200
+        assert "records" in ledger_resp.json()
+
+        verify_resp = client.get("/api/logs/verify_chain")
+        assert verify_resp.status_code == 200
+        assert verify_resp.json()["status"] == "verified"
+
+    def test_ws_telemetry_action_handlers(self, tmp_path):
+        """Verify WebSocket client messages update alarms, sensors, and manual snapshots."""
+        import asyncio
+        from backend.state import AppState
+        from backend.ws.telemetry import _handle_client_message
+        import modules.database_module as db_mod
+
+        orig_db = db_mod.DB_FILE
+        db_file = str(tmp_path / "ws_test.db")
+        db_mod.DB_FILE = db_file
+        db_mod.init_db(db_file)
+
+        try:
+            s = AppState()
+            s.alarm_manager.db_path = db_file
+            s.alarm_manager.raise_alarm("CO2_WARN", "MEDIUM", "CO2 rising")
+
+            # WS Action: acknowledge alarm
+            asyncio.run(_handle_client_message({"action": "alarm_ack", "code": "CO2_WARN", "ack_by": "Cdr. Sharma"}, s))
+            assert s.alarm_manager.active_alarms["CO2_WARN"].acknowledged is True
+
+            # WS Action: 120s audio pause
+            asyncio.run(_handle_client_message({"action": "alarm_mute", "duration": 120.0}, s))
+            assert s.alarm_manager.is_audio_paused() is True
+
+            # WS Action: sensor mode
+            asyncio.run(_handle_client_message({"action": "set_sensor_mode", "mode": "replay"}, s))
+            assert s.sensor_adapter.mode == "replay"
+
+            # WS Action: log snapshot
+            asyncio.run(_handle_client_message({"action": "log_snapshot"}, s))
+            logs = db_mod.get_logs(db_path=db_file)
+            assert len(logs) == 1
+            assert logs.iloc[0]["rmssd"] > 0.0
+            assert logs.iloc[0]["co2_mmhg"] > 0.0
+            # Hash chain updated in state
+            assert s.hash_chain.entry_count == 1
+            assert s.hash_chain.current_hash != AuditHashChain.GENESIS_HASH
+        finally:
+            db_mod.DB_FILE = orig_db
+
 
