@@ -3,10 +3,15 @@ MAITRI 2.0 — M4: Multimodal Fusion Module
 Quality-aware weighted fusion of face emotion + voice emotion + vitals strain + eye fatigue.
 Uses EMA temporal smoothing with adaptive reactivity to prevent flickering.
 
+Phase 2 Extensions:
+- Personal Baseline Calibration (Z-Score & CUSUM drift detection) to mitigate
+  cephalic fluid shift ("puffy-face" syndrome) bias in microgravity.
+- Explainable fusion breakdown with percentage weights and clinical rationales.
+
 Modality Structure:
 - Behavioral Channels: Face (visual) + Voice (audio)
   Initial nominal baseline ratio: 60% Face / 40% Voice.
-- Physiological Channel: Vitals Strain (cardiac, thermal, SpO₂)
+- Physiological Channel: Vitals Strain (cardiac, thermal, SpO₂, HRV, respiration)
 - Ocular Channel: Eye Fatigue & Blink Strain (MediaPipe EAR)
 
 Dynamic Quality-Aware & Silence VAD Gating:
@@ -18,7 +23,8 @@ Dynamic Quality-Aware & Silence VAD Gating:
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+import math
+from typing import Any, Dict, List, Optional, Tuple
 
 # 7 standard emotion classes (FER / DeepFace convention)
 EMOTIONS = ["angry", "disgust", "fear", "happy", "neutral", "sad", "surprise"]
@@ -72,11 +78,168 @@ def _uniform() -> Dict[str, float]:
     return {e: 1.0 / len(EMOTIONS) for e in EMOTIONS}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Personal Baseline Calibration & Cephalic Fluid Shift Mitigation
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class PersonalBaseline:
+    """
+    Crew personal baseline calibration model.
+    Mitigates cephalic fluid shift ("puffy-face") bias where cephalic venous engorgement
+    and periorbital edema alter resting facial geometry in microgravity.
+    Calculates personal Z-scores and Page's CUSUM control charts to detect authentic
+    drift from individual resting baselines.
+    """
+    crew_id: str = "cdr_sharma"
+    sample_count: int = 0
+    calibration_target: int = 30
+    is_calibrated: bool = False
+
+    # Baseline means (mu)
+    mu_negative_affect: float = 0.05
+    mu_ear: float = 0.28
+    mu_vitals_strain: float = 0.10
+    mu_face_strain: float = 0.05
+
+    # Baseline standard deviations (sigma)
+    sigma_negative_affect: float = 0.04
+    sigma_ear: float = 0.03
+    sigma_vitals_strain: float = 0.08
+    sigma_face_strain: float = 0.05
+
+    # Baseline emotion probability offsets (cephalic fluid shift offsets)
+    baseline_emotion_offsets: Dict[str, float] = field(default_factory=lambda: {
+        "angry": 0.0, "disgust": 0.0, "fear": 0.0,
+        "happy": 0.0, "neutral": 0.0, "sad": 0.0, "surprise": 0.0
+    })
+
+    # CUSUM parameters (Page's Cumulative Sum control chart)
+    cusum_k: float = 0.5   # 0.5 sigma allowance slack
+    cusum_h: float = 4.0   # 4.0 sigma decision boundary threshold
+
+    # CUSUM accumulators
+    cusum_sh: Dict[str, float] = field(default_factory=lambda: {
+        "negative_affect": 0.0,
+        "vitals_strain": 0.0,
+        "face_strain": 0.0,
+    })
+    cusum_sl: Dict[str, float] = field(default_factory=lambda: {
+        "negative_affect": 0.0,
+        "vitals_strain": 0.0,
+        "face_strain": 0.0,
+    })
+    cusum_drift: Dict[str, bool] = field(default_factory=lambda: {
+        "negative_affect": False,
+        "vitals_strain": False,
+        "face_strain": False,
+    })
+
+    def calibrate_step(
+        self,
+        face_probs: Optional[Dict[str, float]],
+        vitals_strain: float,
+        ear: float = 0.28,
+        fatigue_strain: float = 0.0,
+    ) -> None:
+        """Accumulate resting calibration sample using Welford's algorithm."""
+        self.sample_count += 1
+        n = float(self.sample_count)
+
+        neg = 0.0
+        if face_probs:
+            neg = (
+                face_probs.get("fear", 0.0) * 1.2
+                + face_probs.get("angry", 0.0) * 1.1
+                + face_probs.get("sad", 0.0) * 1.0
+                + face_probs.get("disgust", 0.0) * 0.7
+            )
+            for e in EMOTIONS:
+                val = face_probs.get(e, 0.0)
+                old_m = self.baseline_emotion_offsets.get(e, 0.0)
+                self.baseline_emotion_offsets[e] = old_m + (val - old_m) / n
+
+        self.mu_negative_affect += (neg - self.mu_negative_affect) / n
+        self.mu_vitals_strain += (vitals_strain - self.mu_vitals_strain) / n
+        self.mu_ear += (ear - self.mu_ear) / n
+        self.mu_face_strain += (fatigue_strain - self.mu_face_strain) / n
+
+        if self.sample_count >= self.calibration_target:
+            self.is_calibrated = True
+
+    def compute_z_score(self, metric: str, value: float) -> float:
+        """Compute standard normal deviation Z = (x - mu) / sigma."""
+        mu_map = {
+            "negative_affect": self.mu_negative_affect,
+            "vitals_strain": self.mu_vitals_strain,
+            "ear": self.mu_ear,
+            "face_strain": self.mu_face_strain,
+        }
+        sig_map = {
+            "negative_affect": max(0.01, self.sigma_negative_affect),
+            "vitals_strain": max(0.01, self.sigma_vitals_strain),
+            "ear": max(0.01, self.sigma_ear),
+            "face_strain": max(0.01, self.sigma_face_strain),
+        }
+        mu = mu_map.get(metric, 0.0)
+        sigma = sig_map.get(metric, 1.0)
+        return round((value - mu) / sigma, 3)
+
+    def update_cusum(self, metric: str, value: float) -> Tuple[float, float, bool]:
+        """
+        Two-sided tabular CUSUM step:
+        Sh[t] = max(0, Sh[t-1] + z - k)
+        Sl[t] = max(0, Sl[t-1] - z - k)
+        Flags drift when Sh > h or Sl > h.
+        """
+        z = self.compute_z_score(metric, value)
+        k = self.cusum_k
+        h = self.cusum_h
+
+        sh_prev = self.cusum_sh.get(metric, 0.0)
+        sl_prev = self.cusum_sl.get(metric, 0.0)
+
+        sh_new = max(0.0, sh_prev + z - k)
+        sl_new = max(0.0, sl_prev - z - k)
+
+        self.cusum_sh[metric] = round(sh_new, 3)
+        self.cusum_sl[metric] = round(sl_new, 3)
+
+        drift = (sh_new >= h) or (sl_new >= h)
+        self.cusum_drift[metric] = drift
+        return sh_new, sl_new, drift
+
+    def adjust_for_cephalic_fluid_shift(
+        self,
+        face_probs: Optional[Dict[str, float]],
+    ) -> Dict[str, float]:
+        """
+        Mitigates cephalic fluid shift ("puffy-face") bias by subtracting
+        the calibrated resting facial affect offsets.
+        """
+        if not face_probs:
+            return _neutral_probs()
+        if not self.is_calibrated:
+            return _normalise(face_probs)
+
+        adjusted: Dict[str, float] = {}
+        for e in EMOTIONS:
+            raw = face_probs.get(e, 0.0)
+            offset = self.baseline_emotion_offsets.get(e, 0.0)
+            # Suppress static microgravity edema offset for distress emotions
+            if e in ("disgust", "angry", "sad"):
+                adjusted[e] = max(0.0, raw - 0.75 * offset)
+            else:
+                adjusted[e] = max(0.0, raw)
+
+        return _normalise(adjusted)
+
+
 @dataclass
 class FusionState:
     """
-    Persists EMA state across Streamlit reruns via st.session_state.
-    Must be stored as a single object to survive reruns cleanly.
+    Persists EMA state across frames.
+    Must be stored as a single object to survive updates cleanly.
     """
     ema_probs:      Dict[str, float] = field(default_factory=_neutral_probs)
     w_face:         float = _BASE_FACE_W
@@ -86,6 +249,7 @@ class FusionState:
     last_emotion:   str   = "neutral"
     last_stress:    float = 0.0
     initialized:    bool  = False
+    baseline:       PersonalBaseline = field(default_factory=PersonalBaseline)
 
 
 @dataclass
@@ -98,6 +262,7 @@ class FusionResult:
     eye_weight:        float
     stress_pct:        float
     is_speaking:       bool = False
+    explainable_breakdown: Dict[str, Any] = field(default_factory=dict)
 
 
 def _vitals_to_probs(vitals_strain: float) -> Dict[str, float]:
@@ -142,6 +307,7 @@ def fuse(
     is_speaking:    bool = False,
     manual_override: bool = False,
     manual_face_ratio: float = 0.60,
+    calibrate_baseline: bool = False,
 ) -> FusionResult:
     """
     Run one multimodal fusion step. Updates `state` in-place.
@@ -158,14 +324,29 @@ def fuse(
         is_speaking:       True if speech activity detected, False if silence
         manual_override:   If True, use user slider weights rather than dynamic quality
         manual_face_ratio: Behavioral ratio allocated to Face (e.g. 0.60 = 60% Face, 40% Voice)
+        calibrate_baseline:If True, contributes this frame to crew personal baseline
     """
-    # ── 1. Build per-modality probability vectors ─────────────────────────
-    f_probs = _normalise(face_probs) if face_probs else _neutral_probs()
+    # Ensure baseline object is present on state
+    if not hasattr(state, "baseline") or state.baseline is None:
+        state.baseline = PersonalBaseline()
+
+    if calibrate_baseline:
+        state.baseline.calibrate_step(
+            face_probs=face_probs,
+            vitals_strain=vitals_strain,
+            fatigue_strain=fatigue_strain,
+        )
+
+    # ── 1. Cephalic Fluid Shift Bias Mitigation ───────────────────────────
+    compensated_face_probs = state.baseline.adjust_for_cephalic_fluid_shift(face_probs)
+
+    # ── 2. Build per-modality probability vectors ─────────────────────────
+    f_probs = _normalise(compensated_face_probs) if compensated_face_probs else _neutral_probs()
     v_probs = _normalise(_vitals_to_probs(vitals_strain))
     e_probs = _normalise(_eye_to_probs(fatigue_strain))
     vo_probs = _normalise(voice_probs) if (voice_probs and is_speaking) else _neutral_probs()
 
-    # ── 2. Determine target weights ───────────────────────────────────────
+    # ── 3. Determine target weights ───────────────────────────────────────
     if manual_override:
         # User manual mode: slider specifies Face vs Voice ratio
         face_ratio = _clamp(manual_face_ratio, 0.0, 1.0)
@@ -198,8 +379,7 @@ def fuse(
         target_w_eye = _BASE_EYE_W * eye_quality
         target_w_vitals = _BASE_VITALS_W
 
-    # ── 3. Smooth weights via EMA ─────────────────────────────────────────
-    # If not speaking, drop voice weight quickly to 0 to prevent noise leakage
+    # ── 4. Smooth weights via EMA ─────────────────────────────────────────
     gate_alpha_voice = 0.35 if not is_speaking else _GATE_ALPHA
 
     state.w_face   = (1 - _GATE_ALPHA) * state.w_face   + _GATE_ALPHA * target_w_face
@@ -217,13 +397,13 @@ def fuse(
         w_v  = state.w_vitals / total_w
         w_e  = state.w_eye    / total_w
 
-    # ── 4. Weighted probability fusion ────────────────────────────────────
+    # ── 5. Weighted probability fusion ────────────────────────────────────
     raw_probs = {
         e: (w_f * f_probs[e] + w_vo * vo_probs[e] + w_v * v_probs[e] + w_e * e_probs[e])
         for e in EMOTIONS
     }
 
-    # ── 5. Adaptive EMA temporal smoothing (anti-flicker) ─────────────────
+    # ── 6. Adaptive EMA temporal smoothing (anti-flicker) ─────────────────
     prev_stress_norm = state.last_stress / 100.0
     _raw_neg = _clamp(
         raw_probs.get("fear", 0.0) * 1.2
@@ -247,7 +427,7 @@ def fuse(
         }
         state.ema_probs = _normalise(smoothed)
 
-    # ── 6. Composite stress calculation ───────────────────────────────────
+    # ── 7. Composite stress calculation ───────────────────────────────────
     neg_score = _clamp(
         state.ema_probs.get("fear", 0.0) * 1.2
         + state.ema_probs.get("angry", 0.0) * 1.1
@@ -273,6 +453,74 @@ def fuse(
     state.last_emotion = dominant
     state.last_stress  = stress_pct
 
+    # ── 8. CUSUM Drift & Explainable Clinical Breakdown ───────────────────
+    state.baseline.update_cusum("negative_affect", neg_score)
+    state.baseline.update_cusum("vitals_strain", vitals_strain)
+    state.baseline.update_cusum("face_strain", fatigue_strain)
+
+    rationales: List[str] = []
+    # Behavioral rationale
+    if w_f > 0.0:
+        calib_str = "cephalic fluid shift baseline compensated" if state.baseline.is_calibrated else "uncalibrated"
+        rationales.append(
+            f"Face affect allocated {w_f*100:.1f}% weight (quality: {face_quality:.2f}; {calib_str})."
+        )
+    if is_speaking and w_vo > 0.0:
+        rationales.append(
+            f"Voice affect active at {w_vo*100:.1f}% weight (quality: {voice_quality:.2f}; acoustic speech confirmed)."
+        )
+    else:
+        rationales.append(
+            "Voice gated to 0.0% during silence to prevent cabin acoustic noise contamination."
+        )
+
+    # Physiological rationale
+    rationales.append(
+        f"Physiological channel allocated {w_v*100:.1f}% weight (vitals strain: {vitals_strain*100:.1f}%)."
+    )
+
+    # Ocular rationale
+    if eye_quality > 0.0:
+        rationales.append(
+            f"Ocular channel allocated {w_e*100:.1f}% weight (fatigue strain: {fatigue_strain*100:.1f}%)."
+        )
+
+    # Drift rationale
+    for metric, drift in state.baseline.cusum_drift.items():
+        if drift:
+            sh = state.baseline.cusum_sh.get(metric, 0.0)
+            rationales.append(
+                f"CUSUM alert: sustained upward drift in {metric} (Sh={sh:.2f} > h={state.baseline.cusum_h})."
+            )
+
+    explainable_breakdown = {
+        "weights_pct": {
+            "face": round(w_f * 100.0, 1),
+            "voice": round(w_vo * 100.0, 1),
+            "vitals": round(w_v * 100.0, 1),
+            "eye": round(w_e * 100.0, 1),
+        },
+        "modality_contributions_pct": {
+            "face": round(w_f * neg_score * 100.0, 1),
+            "voice": round(w_vo * neg_score * 100.0, 1),
+            "vitals": round(w_v * vitals_strain * 100.0, 1),
+            "eye": round(w_e * fatigue_strain * 100.0, 1),
+        },
+        "baseline": {
+            "is_calibrated": state.baseline.is_calibrated,
+            "sample_count": state.baseline.sample_count,
+            "cephalic_shift_compensated": state.baseline.is_calibrated,
+            "z_scores": {
+                "negative_affect": state.baseline.compute_z_score("negative_affect", neg_score),
+                "vitals_strain": state.baseline.compute_z_score("vitals_strain", vitals_strain),
+                "face_strain": state.baseline.compute_z_score("face_strain", fatigue_strain),
+            },
+            "cusum_drift": dict(state.baseline.cusum_drift),
+            "cusum_sh": dict(state.baseline.cusum_sh),
+        },
+        "clinical_rationales": rationales,
+    }
+
     return FusionResult(
         fused_probs=dict(state.ema_probs),
         dominant_emotion=dominant,
@@ -282,4 +530,5 @@ def fuse(
         eye_weight=w_e,
         stress_pct=stress_pct,
         is_speaking=is_speaking,
+        explainable_breakdown=explainable_breakdown,
     )

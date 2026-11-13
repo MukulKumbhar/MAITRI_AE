@@ -30,6 +30,38 @@ _RMS_WINDOW_SIZE: int = 8             # Number of recent chunks for smoothed RMS
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _VOSK_MODEL_DIR = _PROJECT_ROOT / "models" / "vosk"
 
+_standalone_piper = None
+
+
+def _get_standalone_piper():
+    global _standalone_piper
+    if _standalone_piper is None:
+        try:
+            from piper import PiperVoice
+            model_path = _PROJECT_ROOT / "models" / "piper_voice" / "en_US-lessac-medium.onnx"
+            config_path = _PROJECT_ROOT / "models" / "piper_voice" / "en_US-lessac-medium.onnx.json"
+            if model_path.exists() and config_path.exists():
+                _standalone_piper = PiperVoice.load(str(model_path), str(config_path), use_cuda=False)
+                logger.info("✅ Pre-warmed standalone Piper TTS for instant voice talkback")
+        except Exception as exc:
+            logger.debug("Could not load standalone Piper: %s", exc)
+    return _standalone_piper
+
+
+def _synthesize_standalone_wav(text: str) -> Optional[bytes]:
+    pv = _get_standalone_piper()
+    if pv is not None:
+        try:
+            import io
+            import wave
+            buf = io.BytesIO()
+            with wave.open(buf, "wb") as wf:
+                pv.synthesize_wav(text, wf)
+            return buf.getvalue()
+        except Exception as exc:
+            logger.debug("Standalone Piper synthesis error: %s", exc)
+    return None
+
 
 class VoiceService:
     """
@@ -377,39 +409,6 @@ class VoiceService:
                 "level": level,
             })
             await self._speak_feedback(msg)
-
-_standalone_piper = None
-
-
-def _get_standalone_piper():
-    global _standalone_piper
-    if _standalone_piper is None:
-        try:
-            from piper import PiperVoice
-            model_path = Path(__file__).resolve().parent.parent.parent / "models" / "piper_voice" / "en_US-lessac-medium.onnx"
-            config_path = Path(__file__).resolve().parent.parent.parent / "models" / "piper_voice" / "en_US-lessac-medium.onnx.json"
-            if model_path.exists() and config_path.exists():
-                _standalone_piper = PiperVoice.load(str(model_path), str(config_path), use_cuda=False)
-                logger.info("✅ Pre-warmed standalone Piper TTS for instant voice talkback")
-        except Exception as exc:
-            logger.debug("Could not load standalone Piper: %s", exc)
-    return _standalone_piper
-
-
-def _synthesize_standalone_wav(text: str) -> Optional[bytes]:
-    pv = _get_standalone_piper()
-    if pv is not None:
-        try:
-            import io
-            import wave
-            buf = io.BytesIO()
-            with wave.open(buf, "wb") as wf:
-                pv.synthesize_wav(text, wf)
-            return buf.getvalue()
-        except Exception as exc:
-            logger.debug("Standalone Piper synthesis error: %s", exc)
-    return None
-
 
     async def _speak_feedback(self, text: str) -> None:
         """Synthesize spoken feedback using Piper TTS (with standalone fallback)."""

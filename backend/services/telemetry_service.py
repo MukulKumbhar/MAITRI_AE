@@ -2,11 +2,14 @@
 MAITRI 2.0 — Telemetry Service
 Runs the continuous fusion loop in the FastAPI background, broadcasting
 computed state at 10 Hz to all connected WebSocket clients.
+Integrates Cardio-Respiratory HRV metrics, personal baseline calibration,
+cabin environmental telemetry, IEC 60601-1-8 alarms, and cryptographic audit hashing.
 """
 
 import asyncio
 import json
 import logging
+import math
 import time
 from typing import Any, Dict
 
@@ -30,18 +33,38 @@ def _build_telemetry_payload(state) -> Dict[str, Any]:
     Build a full telemetry JSON payload by running the fusion pipeline.
     This mirrors what app.py does on each Streamlit rerun, but in async FastAPI.
     """
-    # ── 1. Snapshot latest live sensor state ──────────────────────────────
+    # ── 1. Replay / Hardware Simulation step if enabled ──────────────────
+    if hasattr(state, "sensor_adapter") and state.sensor_adapter.mode == "replay":
+        sim = state.sensor_adapter.step_simulation(dt=_INTERVAL)
+        state.heart_rate = sim["heart_rate"]
+        state.temperature = sim["temperature"]
+        state.spo2 = sim["spo2"]
+        state.respiratory_rate = sim["respiratory_rate"]
+        state.rmssd = sim["rmssd"]
+        state.sdnn = sim["sdnn"]
+        state.baevsky_index = sim["baevsky_index"]
+        state.cabin_co2 = sim["co2_mmhg"]
+        state.cabin_o2 = sim["o2_percent"]
+        state.cabin_pressure = sim["pressure_kpa"]
+        state.cabin_temp = sim["ambient_temp_c"]
+        state.cabin_noise = sim["noise_dba"]
+
+    # ── 2. Snapshot latest live sensor state ──────────────────────────────
     face_snap = state.live.snapshot_face()
     voice_snap = state.live.snapshot_voice()
 
-    # ── 2. Vitals strain ──────────────────────────────────────────────────
+    # ── 3. Vitals & Cardio-Respiratory strain ─────────────────────────────
     vitals_result = compute_vitals_strain(
         heart_rate=state.heart_rate,
         temperature=state.temperature,
         spo2=state.spo2,
+        respiratory_rate=getattr(state, "respiratory_rate", None),
+        rmssd=getattr(state, "rmssd", None),
+        sdnn=getattr(state, "sdnn", None),
+        baevsky_index=getattr(state, "baevsky_index", None),
     )
 
-    # ── 3. Multimodal fusion ──────────────────────────────────────────────
+    # ── 4. Multimodal fusion with Personal Baseline & Explainability ──────
     fusion_result = fuse(
         state=state.fusion,
         face_probs=face_snap["emotion_probs"],
@@ -56,21 +79,65 @@ def _build_telemetry_payload(state) -> Dict[str, Any]:
         manual_face_ratio=state.manual_face_ratio,
     )
 
-    # ── 4. Alert engine ───────────────────────────────────────────────────
+    # ── 5. Alert engine ───────────────────────────────────────────────────
     alert_result = get_alert(
         stress_pct=fusion_result.stress_pct,
         dominant_emotion=fusion_result.dominant_emotion,
         fatigue_label=face_snap["fatigue_label"],
     )
 
-    # ── 5. Watchdog update ────────────────────────────────────────────────
+    # ── 6. IEC 60601-1-8 Automated Alarms Evaluation ─────────────────────
+    if hasattr(state, "alarm_manager"):
+        if state.heart_rate >= 130.0:
+            state.alarm_manager.raise_alarm(
+                "HR_HIGH_CRITICAL", "HIGH",
+                f"Critical Tachycardia: {state.heart_rate:.0f} BPM exceeds 130 BPM threshold",
+                "cardiorespiratory"
+            )
+        elif state.heart_rate <= 45.0:
+            state.alarm_manager.raise_alarm(
+                "HR_LOW_CRITICAL", "HIGH",
+                f"Critical Bradycardia: {state.heart_rate:.0f} BPM below 45 BPM threshold",
+                "cardiorespiratory"
+            )
+        elif state.heart_rate >= 100.0:
+            state.alarm_manager.raise_alarm(
+                "HR_HIGH_WARN", "MEDIUM",
+                f"Elevated Heart Rate: {state.heart_rate:.0f} BPM exceeds resting bounds",
+                "cardiorespiratory"
+            )
+
+        if state.spo2 <= 88.0:
+            state.alarm_manager.raise_alarm(
+                "SPO2_LOW_CRITICAL", "HIGH",
+                f"Severe Hypoxia: SpO2 {state.spo2:.1f}% below 88% critical ceiling",
+                "cardiorespiratory"
+            )
+        elif state.spo2 <= 93.0:
+            state.alarm_manager.raise_alarm(
+                "SPO2_LOW_WARN", "MEDIUM",
+                f"Mild Hypoxia: SpO2 {state.spo2:.1f}% below 93% warning threshold",
+                "cardiorespiratory"
+            )
+
+        if getattr(state, "cabin_co2", 3.0) >= 7.0:
+            state.alarm_manager.raise_alarm(
+                "CO2_HIGH_CRITICAL", "HIGH",
+                f"ECLSS CO2 Critical: {state.cabin_co2:.1f} mmHg exceeds 7.0 mmHg toxicity limit",
+                "cabin_env"
+            )
+
+        # Check unacknowledged alarm escalation (3-min rule)
+        state.alarm_manager.check_escalation()
+
+    # ── 7. Watchdog update ────────────────────────────────────────────────
     watchdog_status = state.watchdog.update(
         is_speaking=voice_snap["is_speaking"],
         ear=face_snap["ear"],
         face_quality=face_snap["face_quality"],
     )
 
-    # ── 6. Auto-log if enabled ────────────────────────────────────────────
+    # ── 8. Auto-log if enabled with cryptographic chaining ────────────────
     if state.auto_log_enabled:
         try:
             log_event(
@@ -87,13 +154,22 @@ def _build_telemetry_payload(state) -> Dict[str, Any]:
                 alert_triggered=alert_result.header,
                 response_msg=alert_result.body,
                 emotion_probs=fusion_result.fused_probs,
+                rmssd=vitals_result.rmssd,
+                sdnn=vitals_result.sdnn,
+                baevsky_index=vitals_result.baevsky_index,
+                respiratory_rate=vitals_result.respiratory_rate,
+                co2_mmhg=getattr(state, "cabin_co2", 3.0),
+                o2_percent=getattr(state, "cabin_o2", 20.9),
+                pressure_kpa=getattr(state, "cabin_pressure", 101.3),
+                ambient_temp_c=getattr(state, "cabin_temp", 22.0),
+                noise_dba=getattr(state, "cabin_noise", 58.0),
             )
         except Exception as exc:
             logger.debug("Auto-log error: %s", exc)
 
-    # ── 7. Assemble canonical payload (matches Section 2.3 schema) ────────
+    # ── 9. Assemble canonical payload ─────────────────────────────────────
     voice_rms = voice_snap["voice_rms"]
-    voice_db = round(20 * __import__("math").log10(max(voice_rms, 1e-9)), 1) if voice_rms > 0 else -90.0
+    voice_db = round(20 * math.log10(max(voice_rms, 1e-9)), 1) if voice_rms > 0 else -90.0
 
     return {
         "type": "telemetry_update",
@@ -131,6 +207,11 @@ def _build_telemetry_payload(state) -> Dict[str, Any]:
             "spo2_strain": round(vitals_result.spo2_strain, 4),
             "composite_strain": round(vitals_result.vitals_strain, 4),
             "status": vitals_result.status,
+            "respiratory_rate": round(vitals_result.respiratory_rate, 1),
+            "rmssd": round(vitals_result.rmssd, 2),
+            "sdnn": round(vitals_result.sdnn, 2),
+            "baevsky_index": round(vitals_result.baevsky_index, 1),
+            "hrv_strain": round(vitals_result.hrv_strain, 4),
         },
         "fusion": {
             "stress_pct": fusion_result.stress_pct,
@@ -146,6 +227,7 @@ def _build_telemetry_payload(state) -> Dict[str, Any]:
             "is_speaking": fusion_result.is_speaking,
             "manual_override": state.manual_override,
             "manual_face_ratio": state.manual_face_ratio,
+            "explainable_breakdown": getattr(fusion_result, "explainable_breakdown", {}),
         },
         "alert": {
             "level": alert_result.stress_level,
@@ -159,6 +241,19 @@ def _build_telemetry_payload(state) -> Dict[str, Any]:
             "state": watchdog_status.state,
             "countdown": _get_watchdog_countdown(state.watchdog),
             "message": watchdog_status.alert_message,
+        },
+        "cabin": {
+            "co2_mmhg": getattr(state, "cabin_co2", 3.0),
+            "o2_percent": getattr(state, "cabin_o2", 20.9),
+            "pressure_kpa": getattr(state, "cabin_pressure", 101.3),
+            "ambient_temp_c": getattr(state, "cabin_temp", 22.0),
+            "noise_dba": getattr(state, "cabin_noise", 58.0),
+        },
+        "alarms": state.alarm_manager.get_summary() if hasattr(state, "alarm_manager") else {},
+        "sensor_adapter": state.sensor_adapter.get_status() if hasattr(state, "sensor_adapter") else {"mode": "manual"},
+        "security": {
+            "audit_hash": state.hash_chain.current_hash if hasattr(state, "hash_chain") else "0"*64,
+            "entry_count": state.hash_chain.entry_count if hasattr(state, "hash_chain") else 0,
         },
         "settings": {
             "mic_gain": state.mic_gain,

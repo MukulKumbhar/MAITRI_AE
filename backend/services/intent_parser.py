@@ -102,6 +102,9 @@ PHONETIC_REPLACEMENTS = [
     (r"\bsp o two\b", "spo2"),
     (r"\bfor seven eight\b", "four seven eight"),
     (r"\bat knowledge\b", "acknowledge"),
+    (r"\b(her three|hurt rate|part rate|hard rate)\b", "heart rate"),
+    (r"\bthat her\b", "set heart"),
+    (r"\bthat heart rate\b", "set heart rate"),
 ]
 
 # Critical intents that require a two-step confirmation safety gate
@@ -246,7 +249,7 @@ def parse_intent(transcript: str, confidence_threshold: float = 0.6) -> Dict[str
                             continue
                         matched = sum(
                             1 for pt, tt in zip(pattern_tokens, window)
-                            if levenshtein(pt, tt) <= 1
+                            if (pt == tt or (len(pt) > 4 and levenshtein(pt, tt) <= 1))
                         )
                         window_score = matched / len(pattern_tokens)
                         max_window_score = max(max_window_score, window_score)

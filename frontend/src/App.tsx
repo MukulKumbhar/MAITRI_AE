@@ -15,10 +15,41 @@ import { audioService } from "./services/audioSocket";
 import { acknowledgeWatchdog } from "./services/api";
 
 export const App: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<TabId>("live");
+  const getInitialTab = (): TabId => {
+    try {
+      const hash = window.location.hash.replace("#", "") as TabId;
+      if (["live", "logs", "mission", "support"].includes(hash)) return hash;
+      const params = new URLSearchParams(window.location.search);
+      const tab = params.get("tab") as TabId;
+      if (["live", "logs", "mission", "support"].includes(tab)) return tab;
+    } catch {
+      // fallback
+    }
+    return "live";
+  };
+
+  const getInitialStudy = (): boolean => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      return params.get("study") === "1" || params.get("modal") === "study";
+    } catch {
+      return false;
+    }
+  };
+
+  const getInitialVoiceDebug = (): boolean => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      return params.get("debug") === "1" || params.get("drawer") === "voice";
+    } catch {
+      return false;
+    }
+  };
+
+  const [activeTab, setActiveTab] = useState<TabId>(getInitialTab());
   const [telemetry, setTelemetry] = useState<TelemetryPayload | null>(null);
-  const [isStudyOpen, setIsStudyOpen] = useState<boolean>(false);
-  const [isVoiceDebugOpen, setIsVoiceDebugOpen] = useState<boolean>(false);
+  const [isStudyOpen, setIsStudyOpen] = useState<boolean>(getInitialStudy());
+  const [isVoiceDebugOpen, setIsVoiceDebugOpen] = useState<boolean>(getInitialVoiceDebug());
   const [voiceDebugState, setVoiceDebugState] = useState<VoiceDebugInfo>(audioService.debugState);
   const [isMicCapturing, setIsMicCapturing] = useState<boolean>(false);
 

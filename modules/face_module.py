@@ -117,7 +117,7 @@ def _get_onnx_session():
         try:
             import onnxruntime as ort
             sess_opts = ort.SessionOptions()
-            sess_opts.intra_op_num_threads = min(6, os.cpu_count() or 6)
+            sess_opts.intra_op_num_threads = min(8, os.cpu_count() or 8)
             sess_opts.inter_op_num_threads = 1
             sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 

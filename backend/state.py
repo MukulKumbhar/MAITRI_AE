@@ -2,28 +2,408 @@
 MAITRI 2.0 — Singleton Shared Application State
 Holds all runtime objects that must survive across FastAPI requests and WebSocket connections.
 Thread-safe access via asyncio.Lock or threading.Lock depending on context.
+
+Phase 2 Extensions:
+- HardwareSensorAdapter: supporting modes ['live', 'manual', 'replay'] with
+  realistic simulated drift and physiological events.
+- IEC 60601-1-8 Tiered Alarm Structure: HIGH, MEDIUM, LOW, INFO with
+  deduplication, acknowledge state, 120-second clinical audio pause/mute,
+  and 3-minute auto-escalation.
+- Cryptographic Hash Chain Tracking: sha256(prev_hash + entry) for audit integrity.
+- Cabin Environmental Metrics: CO2, O2, pressure, temperature, noise.
 """
 
 import asyncio
+from dataclasses import dataclass, field
+from enum import Enum
+import hashlib
+import json
+import math
 import os
-import sys
 from pathlib import Path
-from typing import Optional, Set
+import sys
+import time
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # ── Path Setup ────────────────────────────────────────────────────────────────
-# Add project root to sys.path so modules/ resolves correctly from any cwd.
 _HERE = Path(__file__).resolve().parent.parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-# ── Determine project root and DB path ────────────────────────────────────────
-# Support PyInstaller: use sys._MEIPASS if frozen
 _PROJECT_ROOT: Path = Path(getattr(sys, "_MEIPASS", str(_HERE)))
 
 # ── Import MAITRI modules ─────────────────────────────────────────────────────
 from modules.live_state import LiveState
 from modules.fusion_module import FusionState
 from modules.mission_core import NativeWatchdog, NativeDTNOutbox
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hardware Sensor Adapter State & Simulation Replay
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class SensorChannelStatus:
+    channel_id: str
+    connected: bool = True
+    quality: float = 0.98
+    last_update: float = field(default_factory=time.time)
+    description: str = ""
+
+
+class HardwareSensorAdapter:
+    """
+    Hardware Sensor Adapter supporting modes:
+    - 'live': Real camera, microphone, and direct hardware inputs.
+    - 'manual': Interactive slider/override adjustments.
+    - 'replay': Deterministic physiological simulation and scenario replay.
+    """
+    VALID_MODES = ("live", "manual", "replay")
+
+    def __init__(self, mode: str = "manual"):
+        self.mode: str = mode if mode in self.VALID_MODES else "manual"
+        self.scenario: str = "nominal_flight"  # nominal_flight, co2_retention, eva_strain, solar_flare
+        self.sim_elapsed: float = 0.0
+        self.replay_speed: float = 1.0
+        self.channels: Dict[str, SensorChannelStatus] = {
+            "optical_face": SensorChannelStatus("optical_face", description="Optical RGB Face Tracker"),
+            "audio_mic": SensorChannelStatus("audio_mic", description="Dual Cabin Microphone Array"),
+            "ppg_sensor": SensorChannelStatus("ppg_sensor", description="Reflectance Pulse Oximeter"),
+            "ecg_lead": SensorChannelStatus("ecg_lead", description="Lead-II Bio-Patch"),
+            "cabin_eclss": SensorChannelStatus("cabin_eclss", description="ECLSS Atmospheric Bus"),
+        }
+
+    def set_mode(self, mode: str) -> None:
+        if mode in self.VALID_MODES:
+            self.mode = mode
+
+    def set_scenario(self, scenario: str) -> None:
+        self.scenario = scenario
+        self.sim_elapsed = 0.0
+
+    def step_simulation(self, dt: float = 0.1) -> Dict[str, Any]:
+        """
+        Advances the simulation clock and returns realistic drifting vitals
+        and cabin environmental metrics based on active scenario.
+        """
+        self.sim_elapsed += dt * self.replay_speed
+        t = self.sim_elapsed
+
+        if self.scenario == "co2_retention":
+            # CO2 scrubber saturation: CO2 rises, HR increases, respiratory rate increases
+            co2 = min(9.5, 3.0 + 0.05 * t)
+            o2 = max(19.2, 20.9 - 0.01 * t)
+            hr = min(110.0, 72.0 + 0.25 * t)
+            rr = min(26.0, 14.0 + 0.10 * t)
+            temp = 36.7 + 0.1 * math.sin(t * 0.05)
+            spo2 = max(94.0, 98.0 - 0.03 * t)
+            rmssd = max(18.0, 45.0 - 0.2 * t)
+            baevsky = min(380.0, 90.0 + 2.5 * t)
+        elif self.scenario == "eva_strain":
+            # Extravehicular physical exertion: high HR, high core temp, high respiratory rate
+            co2 = 3.2 + 0.2 * math.sin(t * 0.1)
+            o2 = 20.8
+            hr = min(140.0, 75.0 + 0.6 * t)
+            rr = min(30.0, 15.0 + 0.18 * t)
+            temp = min(38.2, 36.8 + 0.015 * t)
+            spo2 = max(95.0, 98.0 - 0.02 * t)
+            rmssd = max(14.0, 42.0 - 0.3 * t)
+            baevsky = min(520.0, 100.0 + 4.0 * t)
+        elif self.scenario == "solar_flare":
+            # Radiation alarm and acute stress response: HR spikes, rMSSD drops sharply
+            co2 = 3.0
+            o2 = 20.9
+            hr = 85.0 + 15.0 * math.sin(t * 0.2)
+            rr = 18.0 + 3.0 * math.cos(t * 0.2)
+            temp = 36.9
+            spo2 = 98.0
+            rmssd = max(16.0, 35.0 - 0.15 * t)
+            baevsky = min(420.0, 120.0 + 3.0 * t)
+        else:
+            # Nominal flight: slight physiological baseline fluctuations with RSA
+            co2 = 3.0 + 0.15 * math.sin(t * 0.05)
+            o2 = 20.9
+            hr = 72.0 + 2.5 * math.sin(t * 0.1) + 1.2 * math.cos(t * 0.3)
+            rr = 14.0 + 0.8 * math.sin(t * 0.15)
+            temp = 36.6 + 0.05 * math.sin(t * 0.02)
+            spo2 = 98.2 + 0.3 * math.cos(t * 0.08)
+            rmssd = 45.0 + 4.0 * math.sin(t * 0.1)
+            baevsky = 95.0 + 10.0 * math.sin(t * 0.1)
+
+        return {
+            "heart_rate": round(hr, 1),
+            "temperature": round(temp, 2),
+            "spo2": round(min(100.0, spo2), 1),
+            "respiratory_rate": round(rr, 1),
+            "rmssd": round(rmssd, 1),
+            "baevsky_index": round(baevsky, 1),
+            "co2_mmhg": round(co2, 2),
+            "o2_percent": round(o2, 2),
+            "pressure_kpa": 101.3,
+            "ambient_temp_c": 22.0,
+            "noise_dba": 58.0,
+        }
+
+    def get_status(self) -> Dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "scenario": self.scenario,
+            "sim_elapsed": round(self.sim_elapsed, 1),
+            "replay_speed": self.replay_speed,
+            "channels": {
+                k: {"connected": v.connected, "quality": v.quality, "description": v.description}
+                for k, v in self.channels.items()
+            },
+        }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IEC 60601-1-8 Tiered Alarm Structure & Deduplication
+# ─────────────────────────────────────────────────────────────────────────────
+
+class AlarmPriority(str, Enum):
+    HIGH = "HIGH"       # Immediate operator response required (Red)
+    MEDIUM = "MEDIUM"   # Prompt operator response required (Yellow)
+    LOW = "LOW"         # Awareness required (Cyan / Amber)
+    INFO = "INFO"       # Informational notification (Blue / White)
+
+
+@dataclass
+class AlarmEvent:
+    alarm_id: str                   # e.g. "ALM_HR_001"
+    code: str                       # e.g. "HR_HIGH_CRITICAL"
+    priority: str                   # "HIGH", "MEDIUM", "LOW", "INFO"
+    message: str
+    source: str = "clinical"        # "cardiorespiratory", "cabin_env", "affect", "system"
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+    acknowledged: bool = False
+    ack_timestamp: Optional[float] = None
+    ack_by: Optional[str] = None
+    escalated: bool = False
+    escalated_at: Optional[float] = None
+    original_priority: Optional[str] = None
+    occurrence_count: int = 1
+    active: bool = True
+
+
+class AlarmManager:
+    """
+    IEC 60601-1-8 Medical Alarm Management System:
+    - Tiered alarms: HIGH, MEDIUM, LOW, INFO
+    - Alarm deduplication to prevent alarm flooding
+    - Operator acknowledgment tracking
+    - 120-second clinical audio pause/mute (clause 6.8.4)
+    - 3-minute (180s) auto-escalation of unacknowledged alarms
+    """
+    def __init__(self):
+        self.active_alarms: Dict[str, AlarmEvent] = {}  # key: code
+        self.alarm_history: List[AlarmEvent] = []
+        self.audio_pause_until: float = 0.0
+        self.counter: int = 0
+
+    def pause_audio(self, duration_sec: float = 120.0) -> float:
+        """Pause clinical alarm audio for 120 seconds (IEC 60601-1-8 clause 6.8.4)."""
+        self.audio_pause_until = time.time() + duration_sec
+        return self.audio_pause_until
+
+    def is_audio_paused(self) -> bool:
+        return time.time() < self.audio_pause_until
+
+    def remaining_audio_pause_sec(self) -> float:
+        return max(0.0, self.audio_pause_until - time.time())
+
+    def raise_alarm(
+        self,
+        code: str,
+        priority: str,
+        message: str,
+        source: str = "clinical",
+    ) -> AlarmEvent:
+        """
+        Raise or update an alarm with automatic deduplication.
+        If an active alarm with the same code exists, updates timestamp and increments count.
+        """
+        now = time.time()
+        priority_clean = priority.upper() if priority.upper() in ("HIGH", "MEDIUM", "LOW", "INFO") else "INFO"
+
+        if code in self.active_alarms and self.active_alarms[code].active:
+            # Deduplicate
+            existing = self.active_alarms[code]
+            existing.occurrence_count += 1
+            existing.updated_at = now
+            existing.message = message
+            return existing
+
+        self.counter += 1
+        alarm_id = f"ALM_{code[:6]}_{self.counter:04d}"
+        alarm = AlarmEvent(
+            alarm_id=alarm_id,
+            code=code,
+            priority=priority_clean,
+            message=message,
+            source=source,
+            created_at=now,
+            updated_at=now,
+        )
+        self.active_alarms[code] = alarm
+        self.alarm_history.insert(0, alarm)
+        return alarm
+
+    def acknowledge_alarm(self, code_or_id: str, ack_by: str = "crew") -> Optional[AlarmEvent]:
+        now = time.time()
+        target: Optional[AlarmEvent] = None
+        if code_or_id in self.active_alarms:
+            target = self.active_alarms[code_or_id]
+        else:
+            for a in self.active_alarms.values():
+                if a.alarm_id == code_or_id:
+                    target = a
+                    break
+
+        if target:
+            target.acknowledged = True
+            target.ack_timestamp = now
+            target.ack_by = ack_by
+            return target
+        return None
+
+    def resolve_alarm(self, code_or_id: str) -> Optional[AlarmEvent]:
+        target: Optional[AlarmEvent] = None
+        code_key = None
+        if code_or_id in self.active_alarms:
+            code_key = code_or_id
+            target = self.active_alarms[code_or_id]
+        else:
+            for k, a in self.active_alarms.items():
+                if a.alarm_id == code_or_id:
+                    code_key = k
+                    target = a
+                    break
+
+        if target and code_key:
+            target.active = False
+            del self.active_alarms[code_key]
+            return target
+        return None
+
+    def check_escalation(self, now: Optional[float] = None) -> List[AlarmEvent]:
+        """
+        Check for unacknowledged active alarms older than 180s (3 minutes).
+        Escalates LOW -> MEDIUM, MEDIUM -> HIGH.
+        """
+        current_time = now if now is not None else time.time()
+        escalated_list: List[AlarmEvent] = []
+
+        for alarm in self.active_alarms.values():
+            if alarm.active and not alarm.acknowledged and not alarm.escalated:
+                age = current_time - alarm.created_at
+                if age >= 180.0:
+                    alarm.escalated = True
+                    alarm.escalated_at = current_time
+                    alarm.original_priority = alarm.priority
+
+                    # Priority escalation mapping
+                    if alarm.priority == "LOW":
+                        alarm.priority = "MEDIUM"
+                    elif alarm.priority == "MEDIUM":
+                        alarm.priority = "HIGH"
+                    # HIGH remains HIGH, flagged escalated
+                    escalated_list.append(alarm)
+
+        return escalated_list
+
+    def get_summary(self) -> Dict[str, Any]:
+        self.check_escalation()
+        active = list(self.active_alarms.values())
+        return {
+            "total_active": len(active),
+            "unacknowledged_count": sum(1 for a in active if not a.acknowledged),
+            "audio_paused": self.is_audio_paused(),
+            "audio_pause_remaining_sec": round(self.remaining_audio_pause_sec(), 1),
+            "high_count": sum(1 for a in active if a.priority == "HIGH"),
+            "medium_count": sum(1 for a in active if a.priority == "MEDIUM"),
+            "low_count": sum(1 for a in active if a.priority == "LOW"),
+            "info_count": sum(1 for a in active if a.priority == "INFO"),
+            "active_alarms": [
+                {
+                    "alarm_id": a.alarm_id,
+                    "code": a.code,
+                    "priority": a.priority,
+                    "message": a.message,
+                    "source": a.source,
+                    "acknowledged": a.acknowledged,
+                    "escalated": a.escalated,
+                    "occurrence_count": a.occurrence_count,
+                    "created_at": a.created_at,
+                }
+                for a in active
+            ],
+        }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cryptographic Hash Chain Tracking (SHA-256)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class AuditHashChain:
+    """
+    SHA-256 Cryptographic Hash Chain for air-gapped mission audit logging.
+    Each entry is chained:
+        h_0 = GENESIS_HASH
+        h_i = SHA256(h_{i-1} + "|" + CanonicalPayload)
+    Provides verifiable tamper-evidence for medical and life-support records.
+    """
+    GENESIS_HASH = "0000000000000000000000000000000000000000000000000000000000000000"
+
+    def __init__(self, genesis: Optional[str] = None):
+        self.current_hash: str = genesis or self.GENESIS_HASH
+        self.entry_count: int = 0
+
+    def append(self, entry_payload: Any) -> Tuple[str, str]:
+        """
+        Computes SHA-256 hash chained to current_hash.
+        Returns (prev_hash, record_hash).
+        """
+        prev_hash = self.current_hash
+        if isinstance(entry_payload, dict):
+            canonical = json.dumps(entry_payload, sort_keys=True, default=str)
+        else:
+            canonical = str(entry_payload)
+
+        raw = f"{prev_hash}|{canonical}".encode("utf-8")
+        record_hash = hashlib.sha256(raw).hexdigest()
+        self.current_hash = record_hash
+        self.entry_count += 1
+        return prev_hash, record_hash
+
+    @staticmethod
+    def verify_chain(records: List[Dict[str, Any]]) -> Tuple[bool, Optional[int]]:
+        """
+        Verifies that records forms an unbroken cryptographic hash chain.
+        Returns (is_valid, failing_index).
+        """
+        if not records:
+            return True, None
+
+        expected_prev = records[0].get("prev_hash", AuditHashChain.GENESIS_HASH)
+        for idx, rec in enumerate(records):
+            actual_prev = rec.get("prev_hash", "")
+            if actual_prev != expected_prev:
+                return False, idx
+
+            payload = {k: v for k, v in rec.items() if k not in ("prev_hash", "record_hash", "id")}
+            canonical = json.dumps(payload, sort_keys=True, default=str)
+            computed_hash = hashlib.sha256(f"{actual_prev}|{canonical}".encode("utf-8")).hexdigest()
+
+            actual_record_hash = rec.get("record_hash", "")
+            if actual_record_hash and actual_record_hash != computed_hash:
+                return False, idx
+
+            expected_prev = actual_record_hash or computed_hash
+
+        return True, None
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Global singleton state container
@@ -44,10 +424,26 @@ class AppState:
         self.watchdog: NativeWatchdog = NativeWatchdog(timeout_sec=45.0)
         self.dtn: NativeDTNOutbox = NativeDTNOutbox()
 
+        # ── Phase 2 Clinical & Hardware Engines ───────────────────────────
+        self.sensor_adapter: HardwareSensorAdapter = HardwareSensorAdapter()
+        self.alarm_manager: AlarmManager = AlarmManager()
+        self.hash_chain: AuditHashChain = AuditHashChain()
+
         # ── Current vitals (user-adjustable via WS or REST) ───────────────
         self.heart_rate: float = 75.0
         self.temperature: float = 36.6
         self.spo2: float = 98.0
+        self.respiratory_rate: float = 14.0
+        self.rmssd: float = 42.0
+        self.sdnn: float = 55.0
+        self.baevsky_index: float = 95.0
+
+        # ── Cabin Environmental Metrics (ECLSS telemetry) ─────────────────
+        self.cabin_co2: float = 3.0       # mmHg (nominal < 4.0, NASA threshold)
+        self.cabin_o2: float = 20.9       # %
+        self.cabin_pressure: float = 101.3  # kPa
+        self.cabin_temp: float = 22.0     # °C
+        self.cabin_noise: float = 58.0    # dBA
 
         # ── Fusion mode ───────────────────────────────────────────────────
         self.manual_override: bool = False
@@ -63,14 +459,13 @@ class AppState:
         self.silence_threshold: float = 0.03
 
         # ── WebSocket connection registries ───────────────────────────────
-        # Active telemetry WebSocket connections (FastAPI WebSocket objects)
         self.telemetry_connections: Set = set()
         self.telemetry_connections_lock: asyncio.Lock = asyncio.Lock()
 
         # ── Auto-log flag ─────────────────────────────────────────────────
         self.auto_log_enabled: bool = False
 
-        # ── Voice / ASR (Phase 3: populated by voice_service) ─────────────
+        # ── Voice / ASR ───────────────────────────────────────────────────
         self.vosk_ready: bool = False
 
         # ── ONNX face model readiness ─────────────────────────────────────
