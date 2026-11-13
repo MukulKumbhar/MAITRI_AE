@@ -41,6 +41,12 @@ from modules.dap_enhancer import (
     calibrate_logits,
 )
 
+# Optional Phase 2 ASR tap for live speech-to-text
+try:
+    from modules.asr_tap import asr_buffer as _asr_tap_buf
+except Exception:
+    _asr_tap_buf = None
+
 # Project root
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -595,11 +601,19 @@ class VoiceDetector:
                 self.live_state.voice_available = True
                 self.voice_available = True
 
+        # Phase 2 ASR tap: route external chunk to Whisper buffer if active
+        if _asr_tap_buf is not None and _asr_tap_buf.enabled:
+            _asr_tap_buf.push(arr)
+
     def _audio_callback(self, indata, frames, time_info, status):
         """sounddevice callback for native 16000 Hz streams."""
         raw = indata[:, 0].astype(np.float32)
         with self._lock:
             self.audio_buffer.extend(raw)
+
+        # Phase 2 ASR tap: route native audio frame to Whisper buffer if active
+        if _asr_tap_buf is not None and _asr_tap_buf.enabled:
+            _asr_tap_buf.push(raw)
 
     def _audio_callback_resampled(self, indata, frames, time_info, status):
         """sounddevice callback with real-time linear resampling to 16 kHz."""
@@ -609,6 +623,10 @@ class VoiceDetector:
         resampled = np.interp(indices, np.arange(len(raw_f32)), raw_f32).astype(np.float32)
         with self._lock:
             self.audio_buffer.extend(resampled)
+
+        # Phase 2 ASR tap: route resampled audio frame to Whisper buffer if active
+        if _asr_tap_buf is not None and _asr_tap_buf.enabled:
+            _asr_tap_buf.push(resampled)
 
     def _worker_loop(self):
         """

@@ -13,6 +13,7 @@ import av
 import cv2
 cv2.setNumThreads(1)
 import numpy as np
+import pandas as pd
 from typing import Optional
 import streamlit as st
 
@@ -478,10 +479,8 @@ class MAITRIAudioProcessor:
                 for r_frame in resampled_frames:
                     arr = r_frame.to_ndarray()
                     arr = arr.flatten()
+                    # push_audio_chunk internally feeds both SER and the Phase 2 ASR tap once
                     self.voice_detector.push_audio_chunk(arr)
-                    # ── Phase 2 ASR tap (optional, zero-impact when disabled) ──
-                    if _ASR_TAP_AVAILABLE and _asr_buffer is not None and _asr_buffer.enabled:
-                        _asr_buffer.push(arr)
             except Exception:
                 pass
         elif _ASR_TAP_AVAILABLE and _asr_buffer is not None and _asr_buffer.enabled:
@@ -930,6 +929,167 @@ def _render_live_assessment(
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# AUTONOMOUS VOICE WAKEUP & HANDS-FREE TAB SWITCHING DIRECTOR
+# ─────────────────────────────────────────────────────────────────────────
+@st.fragment(run_every=0.75)
+def _autonomous_voice_listener():
+    """Lightweight 0.75s polling fragment: wakes up main Streamlit execution when background speech is ready."""
+    if _ASR_TAP_AVAILABLE and _asr_buffer is not None:
+        if _asr_buffer.has_transcript():
+            st.rerun()
+
+_autonomous_voice_listener()
+
+# Global Audio Autoplay: Plays synthesized AI voice response through cabin speakers
+# regardless of which tab the astronaut is currently looking at.
+if st.session_state.get("pending_global_audio"):
+    st.audio(st.session_state["pending_global_audio"], format="audio/wav", autoplay=True)
+    st.session_state["pending_global_audio"] = None
+
+# Root-level autonomous speech event consumer: processes voice commands and conversational queries
+if _ASR_TAP_AVAILABLE and _asr_buffer is not None:
+    auto_event = _asr_buffer.pop_transcript()
+    if auto_event:
+        if auto_event.get("is_command"):
+            t_idx = auto_event.get("tab_index")
+            t_name = auto_event.get("tab_name")
+            act = auto_event.get("action")
+            if t_idx is not None:
+                st.session_state.target_tab_idx = t_idx
+                st.toast(f"🎙️ Voice Director: Switched to {t_name}", icon="🚀")
+                st.rerun()
+            elif act == "log_reading":
+                snap_log = st.session_state.live_state.snapshot()
+                latest_f = st.session_state.get("latest_fusion")
+                latest_a = st.session_state.get("latest_alert")
+                face_emo = st.session_state.get("latest_face_emotion", snap_log.get("face_emotion", "neutral"))
+                fused_emo = latest_f.dominant_emotion if latest_f else face_emo
+                stress_sc = latest_f.stress_pct if latest_f else 0.0
+                stress_lv = latest_a.stress_level if latest_a else "NOMINAL"
+                alert_lbl = latest_a.alert_label if latest_a else "NOMINAL"
+                resp_body = latest_a.body if latest_a else "Telemetry nominal."
+                cur_probs = latest_f.fused_probs if (latest_f and hasattr(latest_f, "fused_probs")) else snap_log.get("emotion_probs")
+                log_event(
+                    face_emotion=face_emo,
+                    fused_emotion=fused_emo,
+                    voice_state=f"{snap_log.get('voice_emotion', 'neutral').capitalize()} ({'Speaking' if snap_log.get('is_speaking') else 'Silent'})",
+                    heart_rate=float(st.session_state.get("live_hr_slider", 75)),
+                    temperature=float(st.session_state.get("live_temp_slider", 36.6)),
+                    spo2=float(st.session_state.get("live_spo2_slider", 98.0)),
+                    blink_rate=float(snap_log.get("blink_rate", 14.0)),
+                    fatigue_label=snap_log.get("fatigue_label", "Normal"),
+                    stress_score=stress_sc,
+                    stress_level=stress_lv,
+                    alert_triggered=alert_lbl,
+                    response_msg=resp_body,
+                    emotion_probs=cur_probs,
+                )
+                st.toast("💾 Voice Command: Mission telemetry logged to database!", icon="✅")
+                st.session_state["last_logged_time"] = time.time()
+                st.rerun()
+        else:
+            # Autonomous conversational speech detected: pass to psychological support engine
+            spoken_txt = auto_event.get("text")
+            if spoken_txt:
+                st.session_state["pending_voice_query"] = spoken_txt
+                st.toast(f"🗣️ Astronaut Voice Received: \"{spoken_txt}\"", icon="🎙️")
+
+# Astronaut Ergonomics Study: Solutions for Busy-Hands Operation
+with st.expander("🛰️ **Astronaut Hands-Free Navigation: Solutions Study & Voice Director** (Click to view)", expanded=False):
+    st.markdown("""
+### 👨‍🚀 Spaceflight Hands-Free Navigation: Ergonomic Analysis & Architecture
+
+In microgravity operations, astronauts' hands are frequently engaged (gripping handrails during high-g thrust, handling fragile payload experiments, operating secondary physical levers, or wearing bulky pressurized EVA gloves). Traditional manual GUI clicking creates cognitive and motor friction. Below is our complete ergonomic study and 5 integrated solutions:
+
+1. **🎙️ Primary: Autonomous Voice Navigation ("Voice Cockpit Director")**
+   - *Technical Mechanism*: Sub-second silence-boundary ASR continuously parses incoming speech for navigation triggers. Phrases like `"switch to logs"`, `"open live feed"`, `"go to psychological support"`, or `"tab 1 / 2 / 3 / 4"` execute tab transitions immediately.
+   - *Advantage*: Zero physical touch required; fully operable inside pressurized EVA helmets or while both hands grip handrails.
+
+2. **⚡ Secondary: Autonomous Telemetry-Driven View Focusing (Priority Override)**
+   - *Technical Mechanism*: When acute distress is detected (stress index >65% or acute fear/panic), the system automatically shifts focus to Tab 4 (AI Psychological Support) and presents guided grounding audio without waiting for astronaut input.
+   - *Advantage*: Rapid crisis intervention during cognitive overload when the astronaut cannot self-advocate.
+
+3. **🖥️ Tertiary: Single-Pane "Heads-Up Cockpit" Mode (Zero Tab Switching)**
+   - *Technical Mechanism*: Consolidates real-time webcam FER, eye-tracking PERCLOS, instant psychological status, and mission telemetry into a single non-paginated pane, eliminating the cognitive burden of tab context-switching.
+
+4. **👁️ Quaternary: Ocular Gaze-Dwell & Intentional Blink Navigation**
+   - *Technical Mechanism*: Leverages the integrated MediaPipe iris tracking pipeline. Sustained gaze dwell (>1.5s) or intentional triple-blinks cycle views silently.
+   - *Advantage*: Operable during high acoustic noise or comms silence.
+
+5. **🦶 Quinary: Foot-Pedal & 1-Key Tactile Hotkeys**
+   - *Technical Mechanism*: Single-touch tactile bindings (Keys `1`, `2`, `3`, `4`) mapped via direct DOM keyboard events.
+   - *Advantage*: Minimal motor movement, zero cursor tracking required.
+""")
+
+# Hotkey and JavaScript Tab Switcher Component with retry resilience
+import streamlit.components.v1 as _components
+
+target_tab_js = ""
+if "target_tab_idx" in st.session_state and st.session_state.target_tab_idx is not None:
+    t_idx = int(st.session_state.target_tab_idx)
+    target_tab_js = f"""
+    let switchAttempts = 0;
+    function executeTabSwitch() {{
+        try {{
+            const doc = window.parent.document;
+            const tabs = doc.querySelectorAll('button[data-baseweb="tab"]');
+            if (tabs && tabs[{t_idx}]) {{
+                tabs[{t_idx}].click();
+            }} else if (switchAttempts < 12) {{
+                switchAttempts++;
+                setTimeout(executeTabSwitch, 40);
+            }}
+        }} catch (e) {{}}
+    }}
+    executeTabSwitch();
+    """
+    st.session_state.target_tab_idx = None
+
+_components.html(f"""
+<script>
+function attachTabHandlers() {{
+    try {{
+        const doc = window.parent.document;
+        {target_tab_js}
+        // Keyboard Hotkey Listener: Keys 1, 2, 3, 4 switch tabs
+        if (!doc._maitri_tab_hotkeys_attached) {{
+            doc._maitri_tab_hotkeys_attached = true;
+            doc.addEventListener('keydown', (e) => {{
+                if (['1', '2', '3', '4'].includes(e.key) && !['INPUT', 'TEXTAREA'].includes(e.target.tagName)) {{
+                    const idx = parseInt(e.key) - 1;
+                    const tabs = doc.querySelectorAll('button[data-baseweb="tab"]');
+                    if (tabs && tabs[idx]) {{
+                        tabs[idx].click();
+                    }}
+                }}
+            }});
+        }}
+    }} catch (err) {{}}
+}}
+setTimeout(attachTabHandlers, 50);
+</script>
+""", height=0, width=0)
+
+# Quick Voice & Tactile Navigation Strip
+col_nav1, col_nav2, col_nav3, col_nav4 = st.columns(4)
+with col_nav1:
+    if st.button("🔴 [1] Live Cockpit", use_container_width=True, key="quick_nav_tab_1"):
+        st.session_state.target_tab_idx = 0
+        st.rerun()
+with col_nav2:
+    if st.button("📊 [2] Telemetry Logs", use_container_width=True, key="quick_nav_tab_2"):
+        st.session_state.target_tab_idx = 1
+        st.rerun()
+with col_nav3:
+    if st.button("🎬 [3] Mission Control", use_container_width=True, key="quick_nav_tab_3"):
+        st.session_state.target_tab_idx = 2
+        st.rerun()
+with col_nav4:
+    if st.button("🧠 [4] Psychological Support", use_container_width=True, key="quick_nav_tab_4"):
+        st.session_state.target_tab_idx = 3
+        st.rerun()
+
+# ─────────────────────────────────────────────────────────────────────────
 # TABS
 # ─────────────────────────────────────────────────────────────────────────
 tab_live, tab_logs, tab_demo, tab_support = st.tabs([
@@ -1110,10 +1270,10 @@ with tab_live:
         is_playing=ctx.state.playing,
     )
 
-    # ── Mission Telemetry Logging Button (outside fragment for 100% stable execution) ──
+    # ── Mission Telemetry Logging (Manual & Cadence Auto-Logger) ────────────
     st.markdown("---")
-    log_col, _ = st.columns([1, 3])
-    with log_col:
+    log_col1, log_col2 = st.columns([1.2, 2.0])
+    with log_col1:
         if st.button("💾 Log Reading to Mission Database", width="stretch"):
             snap_log = st.session_state.live_state.snapshot()
             latest_f = st.session_state.get("latest_fusion")
@@ -1124,6 +1284,7 @@ with tab_live:
             stress_lv = latest_a.stress_level if latest_a else "NORMAL"
             alert_lbl = latest_a.alert_label if latest_a else "NOMINAL"
             resp_body = latest_a.body if latest_a else "Telemetry nominal."
+            cur_probs = latest_f.fused_probs if (latest_f and hasattr(latest_f, "fused_probs")) else snap_log.get("emotion_probs")
 
             log_event(
                 face_emotion    = face_emo,
@@ -1138,11 +1299,48 @@ with tab_live:
                 stress_level    = stress_lv,
                 alert_triggered = alert_lbl,
                 response_msg    = resp_body,
+                emotion_probs   = cur_probs,
             )
             st.session_state["last_logged_time"] = time.time()
-
-        if time.time() - st.session_state.get("last_logged_time", 0) < 4.0:
             st.success("✅ Mission telemetry logged to database.")
+
+    with log_col2:
+        auto_log_enabled = st.checkbox(
+            "🔄 Auto-Log Telemetry to Database (Every 6s while active)",
+            value=st.session_state.get("auto_log_active", True),
+            key="autolog_cadence_toggle",
+            help="Continuously saves 7-emotion affect distribution and biological vitals into SQLite for hands-free mission logging."
+        )
+        st.session_state.auto_log_active = auto_log_enabled
+        if auto_log_enabled and ctx.state.playing:
+            now_t = time.time()
+            if now_t - st.session_state.get("_last_autolog_time", 0) >= 6.0:
+                st.session_state["_last_autolog_time"] = now_t
+                snap_log = st.session_state.live_state.snapshot()
+                latest_f = st.session_state.get("latest_fusion")
+                latest_a = st.session_state.get("latest_alert")
+                face_emo = st.session_state.get("latest_face_emotion", snap_log.get("face_emotion", "neutral"))
+                fused_emo = latest_f.dominant_emotion if latest_f else face_emo
+                stress_sc = latest_f.stress_pct if latest_f else 0.0
+                stress_lv = latest_a.stress_level if latest_a else "NOMINAL"
+                alert_lbl = latest_a.alert_label if latest_a else "NOMINAL"
+                resp_body = latest_a.body if latest_a else "Telemetry nominal."
+                cur_probs = latest_f.fused_probs if (latest_f and hasattr(latest_f, "fused_probs")) else snap_log.get("emotion_probs")
+                log_event(
+                    face_emotion    = face_emo,
+                    fused_emotion   = fused_emo,
+                    voice_state     = f"{snap_log.get('voice_emotion', 'neutral').capitalize()} ({'Speaking' if snap_log.get('is_speaking') else 'Silent'})",
+                    heart_rate      = float(heart_rate),
+                    temperature     = float(skin_temp),
+                    spo2            = float(spo2),
+                    blink_rate      = snap_log.get("blink_rate", 14.0),
+                    fatigue_label   = snap_log.get("fatigue_label", "Normal"),
+                    stress_score    = stress_sc,
+                    stress_level    = stress_lv,
+                    alert_triggered = alert_lbl,
+                    response_msg    = resp_body,
+                    emotion_probs   = cur_probs,
+                )
 
 # ═════════════════════════════════════════════════════════════════════════
 # TAB 2 — MISSION LOGS
@@ -1152,11 +1350,70 @@ with tab_logs:
 
     log_df = get_logs()
     if log_df.empty:
-        st.info("No telemetry logs yet. Use '💾 Log Reading' in the Live tab.")
+        st.info("No telemetry logs yet. Start the camera stream or click '💾 Log Reading' in the Live tab.")
     else:
         trend_df = get_recent_trend(60)
+        if not trend_df.empty:
+            st.markdown("### 📈 Multi-Dimensional Emotion Confidence Trajectory (7 Affect Dimensions)")
+            st.caption("Continuous line graph tracking all 7 emotion probabilities over time. Colors strictly match webcam HUD color codes.")
+
+            # Reshape for Altair
+            emo_keys = ["angry", "disgust", "fear", "happy", "neutral", "sad", "surprise"]
+            col_map = {f"prob_{e}": e for e in emo_keys}
+            available_cols = [c for c in col_map if c in trend_df.columns]
+
+            if available_cols and len(trend_df) > 0:
+                plot_df = trend_df[["timestamp"] + available_cols].copy()
+                plot_df = plot_df.rename(columns=col_map)
+                time_series = pd.to_datetime(plot_df["timestamp"], errors="coerce")
+                plot_df["Time"] = time_series.dt.strftime("%H:%M:%S").fillna(plot_df["timestamp"].astype(str))
+                melted = plot_df.melt(id_vars=["timestamp", "Time"], var_name="Emotion", value_name="Confidence")
+                melted["Confidence (%)"] = (melted["Confidence"] * 100.0).round(1)
+
+                domain = ["angry", "disgust", "fear", "happy", "neutral", "sad", "surprise"]
+                range_colors = [EMO_COLORS.get(e, "#888") for e in domain]
+
+                try:
+                    import altair as alt
+                    chart = (
+                        alt.Chart(melted)
+                        .mark_line(strokeWidth=2.4, point=alt.OverlayMarkDef(size=28, filled=True))
+                        .encode(
+                            x=alt.X("Time:N", title="Mission Time (HH:MM:SS)", axis=alt.Axis(labelAngle=-30, labelOverlap="parity")),
+                            y=alt.Y("Confidence (%):Q", title="Probability / Confidence (%)", scale=alt.Scale(domain=[0, 100])),
+                            color=alt.Color(
+                                "Emotion:N",
+                                scale=alt.Scale(domain=domain, range=range_colors),
+                                legend=alt.Legend(title="Affect Dimension", orient="top", columns=4)
+                            ),
+                            tooltip=["Time:N", "Emotion:N", "Confidence (%):Q", "timestamp:N"]
+                        )
+                        .properties(height=340)
+                        .interactive()
+                    )
+                    st.altair_chart(chart, use_container_width=True)
+                except Exception as chart_err:
+                    st.line_chart(plot_df.set_index("Time")[domain])
+
+                # Emotion switching & confidence metrics
+                met_c1, met_c2, met_c3, met_c4 = st.columns(4)
+                if "fused_emotion" in trend_df.columns:
+                    dom_series = trend_df["fused_emotion"].astype(str).str.lower()
+                    switches = max(0, int((dom_series != dom_series.shift()).sum() - 1))
+                    cur_dom = str(trend_df["fused_emotion"].iloc[-1]).lower()
+                else:
+                    switches = 0
+                    cur_dom = "neutral"
+
+                met_c1.metric("Dominant Affect", cur_dom.upper())
+                met_c2.metric("Affect Switches", f"{switches} events", help="Frequency of dominant emotion transitions across logged readings.")
+                peak_conf = melted["Confidence (%)"].max() if not melted.empty else 0.0
+                met_c3.metric("Peak Confidence", f"{peak_conf:.1f}%")
+                avg_stress = trend_df["stress_score"].mean() if "stress_score" in trend_df.columns else 0.0
+                met_c4.metric("Mean Stress", f"{avg_stress:.1f}%")
+
         if not trend_df.empty and "stress_score" in trend_df.columns:
-            st.markdown("**Stress Index Trend (last 60 readings)**")
+            st.markdown("**Combined Stress Index Trend (last 60 readings)**")
             st.line_chart(trend_df.set_index("timestamp")["stress_score"], color="#e74c3c")
 
         st.markdown("---")
@@ -1175,6 +1432,19 @@ with tab_logs:
         if "fused_emotion" in log_df.columns:
             st.markdown("**Emotion Distribution**")
             st.bar_chart(log_df["fused_emotion"].value_counts())
+
+        # ── Psychological Support Session History ──
+        st.markdown("---")
+        st.markdown("**🧠 In-Flight AI Psychological Support Dialogue History**")
+        try:
+            from modules.database_module import get_psych_logs
+            psych_df = get_psych_logs(50)
+            if psych_df.empty:
+                st.caption("No psychological dialogues recorded yet. Interactions from Tab 4 will appear here.")
+            else:
+                st.dataframe(psych_df, width="stretch", height=240)
+        except Exception as e:
+            st.caption(f"Psychological session table status: {e}")
 
 # ═════════════════════════════════════════════════════════════════════════
 # TAB 3 — DEMO & MISSION CONTROL
@@ -1274,64 +1544,153 @@ with tab_support:
             unsafe_allow_html=True,
         )
 
+        # ── Proactive Grounding Intervention Alert Banner ────────────────────
+        if float(cur_stress) >= 65.0 or str(cur_emo).lower() in ("fear", "angry", "sad"):
+            st.warning(
+                f"🚨 **ELEVATED STRESS TELEMETRY DETECTED ({float(cur_stress):.1f}% · {str(cur_emo).upper()})** — "
+                "Onboard clinical protocols recommend immediate grounding or cognitive defusion.",
+                icon="⚠️"
+            )
+            col_em1, _ = st.columns([1.5, 1.0])
+            with col_em1:
+                if st.button("🧘 Launch Immediate 4-7-8 Guided Grounding Audio Protocol", type="primary", use_container_width=True):
+                    if not mgr.is_loaded:
+                        with st.spinner("Initializing neural engine..."):
+                            mgr.load_models(cfg)
+                    g_script = mgr.generate_grounding_protocol(st.session_state.active_crew, float(cur_stress))
+                    with st.spinner("Synthesizing audio countermeasure (Piper ONNX)..."):
+                        g_wav = mgr.speak(g_script)
+                    if g_wav:
+                        st.session_state["pending_global_audio"] = g_wav
+                    st.session_state.phase2_chat_history.append({"role": "user", "content": "Requesting immediate grounding countermeasure."})
+                    st.session_state.phase2_chat_history.append({
+                        "role": "assistant",
+                        "content": g_script,
+                        "audio": g_wav if g_wav else None,
+                        "autoplay": True if g_wav else False,
+                    })
+                    try:
+                        from modules.database_module import log_psych_event
+                        log_psych_event(
+                            crew_member=st.session_state.active_crew,
+                            mission_phase=st.session_state.active_mission,
+                            input_channel="preset:grounding",
+                            astronaut_query="Requesting immediate grounding countermeasure.",
+                            detected_emotion=str(cur_emo),
+                            stress_pct=float(cur_stress),
+                            ai_response=g_script,
+                            has_audio=bool(g_wav),
+                        )
+                    except Exception:
+                        pass
+                    st.rerun()
+
         st.markdown("---")
 
         # ── 1. Voice Interaction (Astronaut Talks) ───────────────────────────
         st.markdown("### 🎙️ Astronaut Voice Channel (Primary)")
-        st.caption("Speak naturally into your microphone. WebRTC automatically feeds speech into the offline Whisper ASR buffer.")
+        st.caption("Live hands-free speech recognition with ultra-sensitive acoustic detection (picks up distant / quiet murmurs) and silence-boundary auto-trigger.")
 
-        col_v1, col_v2 = st.columns([1.2, 1.0])
-        with col_v1:
+        user_query = None
+        input_channel = "voice"
+
+        # Check for autonomous spoken queries dispatched from top-level listener
+        if st.session_state.get("pending_voice_query"):
+            user_query = st.session_state.pop("pending_voice_query")
+            input_channel = "voice (autonomous_live_vad)"
+            st.success(f"🗣️ Autonomous Live Voice: *\"{user_query}\"*")
+
+        # Live Acoustic Sensitivity & VAD Telemetry Badge
+        if _ASR_TAP_AVAILABLE and _asr_buffer is not None:
+            tel = _asr_buffer.get_telemetry()
+            spk_badge = "🟢 SPEECH DETECTED (VAD ACTIVE)" if tel.get("in_speech") else "⚪ STANDBY / LISTENING"
+            st.markdown(
+                f"<div style='background:#101a2d;border:1px solid #1f3050;border-radius:6px;padding:6px 14px;margin:8px 0;font-size:0.8rem;display:flex;justify-content:space-between;align-items:center;'>"
+                f"<span>🎙️ <b>Acoustic Sensitivity:</b> <span style='color:#00e676;'>HIGH</span> (Distant / Low-Volume Mode)</span>"
+                f"<span><b>VAD State:</b> <b>{spk_badge}</b></span>"
+                f"<span><b>Signal RMS:</b> <code>{tel.get('rms', 0.0):.4f}</code> (Floor: <code>{tel.get('noise_floor', 0.0):.4f}</code>)</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+        col_vrec, col_vbuf = st.columns([1.1, 1.0], gap="medium")
+        with col_vrec:
+            st.markdown("##### 🎤 Direct Voice Dispatch")
+            audio_rec = st.audio_input("Record voice dispatch", key="astronaut_voice_recorder", label_visibility="collapsed")
+            if audio_rec is not None:
+                rec_bytes = audio_rec.getvalue()
+                curr_bytes_hash = hash(rec_bytes)
+                last_bytes_hash = st.session_state.get("_last_audio_rec_hash")
+                if curr_bytes_hash != last_bytes_hash:
+                    st.session_state["_last_audio_rec_hash"] = curr_bytes_hash
+                    if not (mgr and mgr.is_loaded):
+                        with st.spinner("Initializing models..."):
+                            mgr.load_models(cfg)
+                    with st.spinner("Whisper transcribing recorded voice..."):
+                        t_text = mgr.transcribe(rec_bytes)
+                    if t_text.strip():
+                        user_query = t_text.strip()
+                        input_channel = "voice (audio_input)"
+                        st.success(f"🗣️ Transcribed Voice: *\"{user_query}\"*")
+                    else:
+                        st.warning("No intelligible speech recognized in audio clip.")
+
+        with col_vbuf:
+            st.markdown("##### 📻 Live Telemetry Mic Stream Tap")
             tap_enabled = st.checkbox(
-                "🎙️ Enable Continuous Microphone ASR Tap",
+                "🎙️ Enable Continuous Stream Tap (Live Autonomous VAD)",
                 value=st.session_state.get("phase2_voice_tap_active", True),
-                help="When active, microphone frames from Tab 1 are routed to the Whisper speech buffer."
+                help="When active, microphone frames from Tab 1 are routed to the Whisper speech buffer with silence-boundary detection."
             )
             st.session_state.phase2_voice_tap_active = tap_enabled
             if _ASR_TAP_AVAILABLE and _asr_buffer is not None:
                 _asr_buffer.set_enabled(tap_enabled)
                 pending_s = _asr_buffer.pending_samples / 16000.0
-                st.markdown(f"**Mic Buffer:** `{pending_s:.1f}s` queued &nbsp; *(Needs ≥ 1.0s to transcribe)*")
+                st.markdown(f"**Queued Buffer:** `{pending_s:.1f}s` &nbsp; *(Autonomous VAD active · no button click needed)*")
 
-        voice_submitted = False
-        with col_v2:
             is_ready = bool(mgr and mgr.is_loaded)
-            if st.button("🗣️ Transcribe & Submit Astronaut Speech", type="primary", use_container_width=True, disabled=not is_ready):
-                voice_submitted = True
-            if not is_ready:
-                st.caption("⚠️ Click 'Initialize Support Engine' above before speaking.")
-
-        user_query = None
-
-        if voice_submitted and mgr and mgr.is_loaded:
-            if _ASR_TAP_AVAILABLE and _asr_buffer is not None:
-                batch = _asr_buffer.get_batch(min_samples=16000)
-                if batch is not None and len(batch) > 0:
-                    with st.spinner("Whisper transcribing speech..."):
-                        transcribed_text = mgr.transcribe(batch)
-                    if transcribed_text.strip():
-                        user_query = transcribed_text.strip()
-                        st.success(f"🗣️ Transcribed Voice: *\"{user_query}\"*")
+            if st.button("🗣️ Transcribe Live Mic Buffer (Manual Override)", use_container_width=True, disabled=not is_ready):
+                if _ASR_TAP_AVAILABLE and _asr_buffer is not None:
+                    batch = _asr_buffer.drain()
+                    if batch is not None and len(batch) >= 12000:
+                        with st.spinner("Whisper transcribing buffer..."):
+                            transcribed_text = mgr.transcribe(batch)
+                        if transcribed_text.strip():
+                            user_query = transcribed_text.strip()
+                            input_channel = "voice (continuous_tap)"
+                            st.success(f"🗣️ Transcribed Voice: *\"{user_query}\"*")
+                        else:
+                            st.warning("No words detected in audio buffer.")
                     else:
-                        st.warning("No clear words detected in audio buffer. Please speak into the microphone and try again.")
-                else:
-                    st.warning("Audio buffer has less than 1.0s of sound. Make sure the webcam/mic feed is active in Tab 1!")
+                        st.warning("Microphone buffer has insufficient speech audio. Speak into the mic first.")
 
         # ── 2. Text Input (Astronaut Types Option) ───────────────────────────
         typed_msg = st.chat_input("💬 Or type your message to MAITRI if not speaking...")
         if typed_msg:
             user_query = typed_msg
+            input_channel = "text"
 
         # ── 3. Chat History & Conversation Stream ────────────────────────────
-        st.markdown("### 💬 Clinical Dialogue")
+        st.markdown("---")
+        c_head, c_clear = st.columns([3, 1])
+        with c_head:
+            st.markdown("### 💬 Clinical Dialogue")
+        with c_clear:
+            if st.session_state.phase2_chat_history:
+                if st.button("🗑️ Clear History", use_container_width=True):
+                    st.session_state.phase2_chat_history = []
+                    st.rerun()
+
         if not st.session_state.phase2_chat_history:
-            st.info("No conversation logged yet. Speak into the mic or type a message below to begin.")
+            st.info("No conversation logged yet. Speak into the mic or type a message to begin.")
 
         for msg in st.session_state.phase2_chat_history:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
                 if msg.get("audio"):
-                    st.audio(msg["audio"], format="audio/wav")
+                    is_new = msg.get("autoplay", False)
+                    st.audio(msg["audio"], format="audio/wav", autoplay=is_new)
+                    msg["autoplay"] = False
 
         # ── 4. Process Incoming Query (LLM Reasoning + Piper TTS) ────────────
         if user_query and mgr:
@@ -1347,48 +1706,113 @@ with tab_support:
             # Generate empathetic response using Phi-3 with live clinical context
             with st.chat_message("assistant"):
                 with st.spinner("MAITRI clinical reasoning in progress..."):
+                    vitals_str = f"HR: {float(st.session_state.get('live_hr_slider', 75)):.0f} BPM, SpO2: {float(st.session_state.get('live_spo2_slider', 98)):.0f}%, Fatigue: {snap_p2.get('fatigue_label', 'Normal')}"
                     ai_reply = mgr.generate_response(
                         user_text=user_query,
                         emotion=str(cur_emo),
                         stress_pct=float(cur_stress),
+                        astronaut_name=st.session_state.active_crew,
+                        mission_phase=st.session_state.active_mission,
+                        vitals_summary=vitals_str,
+                        chat_history=st.session_state.phase2_chat_history,
                     )
                     if not ai_reply:
-                        ai_reply = "Telemetry acknowledged. I am monitoring your physiological state. Please take a slow, deep breath."
+                        ai_reply = f"{st.session_state.active_crew}, telemetry acknowledged. I am monitoring your physiological state. Please take a slow, deep breath."
                     st.markdown(ai_reply)
 
                 # Synthesize calm voice response via Piper TTS
                 with st.spinner("Synthesizing voice response (Piper ONNX)..."):
                     wav_data = mgr.speak(ai_reply)
-                    if wav_data:
-                        st.audio(wav_data, format="audio/wav", autoplay=True)
 
-            # Save assistant response to state
+            # Save assistant response to state with autoplay flag and global audio cue
+            if wav_data:
+                st.session_state["pending_global_audio"] = wav_data
             st.session_state.phase2_chat_history.append({
                 "role": "assistant",
                 "content": ai_reply,
                 "audio": wav_data if wav_data else None,
+                "autoplay": True if wav_data else False,
             })
+
+            # Log to SQLite database
+            try:
+                from modules.database_module import log_psych_event
+                log_psych_event(
+                    crew_member=st.session_state.active_crew,
+                    mission_phase=st.session_state.active_mission,
+                    input_channel=input_channel,
+                    astronaut_query=user_query,
+                    detected_emotion=str(cur_emo),
+                    stress_pct=float(cur_stress),
+                    ai_response=ai_reply,
+                    has_audio=bool(wav_data),
+                )
+            except Exception:
+                pass
+
             st.rerun()
 
-        # ── 5. Quick Clinical Interventions Presets ──────────────────────────
+        # ── 5. Quick Clinical Interventions Presets (Dynamically Evolving) ───
         st.markdown("---")
-        st.markdown("###### ⚡ Clinical Guidance Presets")
+        st.markdown("###### ⚡ Clinical Guidance Presets (Contextually Evolving)")
+        st.caption("Core grounding & assessment presets are permanently anchored; dynamic slots evolve according to conversational responses and affective telemetry.")
+
+        try:
+            from modules.phase2_core import get_evolved_presets
+            evolved_presets = get_evolved_presets(
+                chat_history=st.session_state.phase2_chat_history,
+                cur_emotion=str(cur_emo),
+                stress_pct=float(cur_stress),
+                mission_phase=st.session_state.active_mission,
+            )
+        except Exception:
+            evolved_presets = [
+                ("🧘 4-7-8 Grounding", "Guide me through a 4-7-8 sensory grounding exercise."),
+                ("📊 Full Assessment", "Assess my current fatigue and stress telemetry across all sensors."),
+                ("🚀 Docking Stress", "I'm feeling high anxiety during this docking phase."),
+                ("💤 Sleep Reset", "Provide sleep and circadian rest guidance for spaceflight insomnia."),
+            ]
+
         pr_cols = st.columns(3)
-        presets = [
-            "I'm feeling high anxiety during this docking phase.",
-            "Guide me through a 4-7-8 grounding exercise.",
-            "Assess my current fatigue and stress telemetry.",
-        ]
-        for p_idx, (p_col, p_text) in enumerate(zip(pr_cols, presets)):
-            with p_col:
-                if st.button(p_text, key=f"quick_preset_{p_idx}", use_container_width=True, disabled=not (mgr and mgr.is_loaded)):
+        for p_idx, (p_label, p_text) in enumerate(evolved_presets):
+            with pr_cols[p_idx % 3]:
+                if st.button(p_label, key=f"quick_preset_{p_idx}_{hash(p_label)}", use_container_width=True):
+                    if not (mgr and mgr.is_loaded):
+                        with st.spinner("Initializing models..."):
+                            mgr.load_models(cfg)
                     st.session_state.phase2_chat_history.append({"role": "user", "content": p_text})
                     with st.spinner("MAITRI clinical reasoning..."):
-                        p_rep = mgr.generate_response(p_text, emotion=str(cur_emo), stress_pct=float(cur_stress))
+                        vitals_str = f"HR: {float(st.session_state.get('live_hr_slider', 75)):.0f} BPM, SpO2: {float(st.session_state.get('live_spo2_slider', 98)):.0f}%, Fatigue: {snap_p2.get('fatigue_label', 'Normal')}"
+                        p_rep = mgr.generate_response(
+                            p_text,
+                            emotion=str(cur_emo),
+                            stress_pct=float(cur_stress),
+                            astronaut_name=st.session_state.active_crew,
+                            mission_phase=st.session_state.active_mission,
+                            vitals_summary=vitals_str,
+                            chat_history=st.session_state.phase2_chat_history,
+                        )
                         p_wav = mgr.speak(p_rep)
+                    if p_wav:
+                        st.session_state["pending_global_audio"] = p_wav
                     st.session_state.phase2_chat_history.append({
                         "role": "assistant",
                         "content": p_rep,
                         "audio": p_wav if p_wav else None,
+                        "autoplay": True if p_wav else False,
                     })
+                    try:
+                        from modules.database_module import log_psych_event
+                        log_psych_event(
+                            crew_member=st.session_state.active_crew,
+                            mission_phase=st.session_state.active_mission,
+                            input_channel=f"preset:{p_label}",
+                            astronaut_query=p_text,
+                            detected_emotion=str(cur_emo),
+                            stress_pct=float(cur_stress),
+                            ai_response=p_rep,
+                            has_audio=bool(p_wav),
+                        )
+                    except Exception:
+                        pass
                     st.rerun()
