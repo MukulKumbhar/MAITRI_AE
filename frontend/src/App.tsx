@@ -65,12 +65,30 @@ export const App: React.FC = () => {
     }
   };
 
+  const getInitialBist = (): boolean => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      return params.get("bist") === "1";
+    } catch {
+      return false;
+    }
+  };
+
+  const getInitialNight = (): boolean => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      return params.get("night") === "1";
+    } catch {
+      return false;
+    }
+  };
+
   const [activeTab, setActiveTab] = useState<TabId>(getInitialTab());
   const [telemetry, setTelemetry] = useState<TelemetryPayload | null>(null);
   const [isStudyOpen, setIsStudyOpen] = useState<boolean>(getInitialStudy());
   const [isVoiceDebugOpen, setIsVoiceDebugOpen] = useState<boolean>(getInitialVoiceDebug());
-  const [isBistOpen, setIsBistOpen] = useState<boolean>(false);
-  const [isCircadianNight, setIsCircadianNight] = useState<boolean>(false);
+  const [isBistOpen, setIsBistOpen] = useState<boolean>(getInitialBist());
+  const [isCircadianNight, setIsCircadianNight] = useState<boolean>(getInitialNight());
   const [voiceDebugState, setVoiceDebugState] = useState<VoiceDebugInfo>(audioService.debugState);
   const [isMicCapturing, setIsMicCapturing] = useState<boolean>(false);
 
