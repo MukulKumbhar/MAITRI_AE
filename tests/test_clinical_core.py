@@ -857,4 +857,31 @@ class TestClinicalDynamicVitalsAndAPI:
         finally:
             db_mod.DB_FILE = orig_db
 
+    def test_ws_update_vitals_extended(self):
+        """Verify WebSocket client update_vitals routes extended cardio-respiratory metrics."""
+        import asyncio
+        from backend.state import AppState
+        from backend.ws.telemetry import _handle_client_message
+
+        s = AppState()
+        msg = {
+            "action": "update_vitals",
+            "heart_rate": 115.0,
+            "temperature": 37.1,
+            "spo2": 95.5,
+            "respiratory_rate": 22.0,
+            "rmssd": 28.5,
+            "sdnn": 35.0,
+            "baevsky_index": 180.0,
+        }
+        asyncio.run(_handle_client_message(msg, s))
+        assert s.heart_rate == 115.0
+        assert s.temperature == 37.1
+        assert s.spo2 == 95.5
+        assert s.manual_respiratory_rate == 22.0
+        assert s.manual_rmssd == 28.5
+        assert s.manual_sdnn == 35.0
+        assert s.manual_baevsky_index == 180.0
+
+
 

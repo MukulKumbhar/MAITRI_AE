@@ -186,10 +186,13 @@ export const BistModal: React.FC<BistModalProps> = ({
               <p className="text-xs text-space-400">
                 {report?.subsystems.camera.details || "Awaiting scan..."}
               </p>
-              {report?.subsystems.camera.has_devices && (
+              {report?.subsystems?.camera && (
                 <div className="text-[11px] font-mono text-space-400">
-                  Devices: {report.subsystems.camera.device_count} | Capture:{" "}
+                  Devices: {report.subsystems.camera.video_devices?.length ?? 0} | Capture:{" "}
                   {report.subsystems.camera.capture_success ? "OK" : "NO"}
+                  {report.subsystems.camera.frame_dimensions &&
+                    report.subsystems.camera.frame_dimensions !== "none" &&
+                    ` (${report.subsystems.camera.frame_dimensions})`}
                 </div>
               )}
             </div>
@@ -206,6 +209,11 @@ export const BistModal: React.FC<BistModalProps> = ({
               <p className="text-xs text-space-400">
                 {report?.subsystems.microphone.details || "Awaiting scan..."}
               </p>
+              {report?.subsystems?.microphone?.devices && report.subsystems.microphone.devices.length > 0 && (
+                <div className="text-[11px] font-mono text-space-400 truncate">
+                  Inputs: {report.subsystems.microphone.devices.join(", ")}
+                </div>
+              )}
             </div>
 
             {/* Neural Models */}
@@ -220,10 +228,14 @@ export const BistModal: React.FC<BistModalProps> = ({
               <p className="text-xs text-space-400">
                 {report?.subsystems.models_on_disk.details || "Awaiting scan..."}
               </p>
-              {report?.subsystems.models_on_disk.models_found && (
+              {report?.subsystems?.models_on_disk?.models && (
                 <div className="text-[11px] font-mono text-space-400">
-                  Bundled models:{" "}
-                  {report.subsystems.models_on_disk.models_found.join(", ") || "None"}
+                  Bundled models ({report.subsystems.models_on_disk.models_found}/
+                  {report.subsystems.models_on_disk.models_total}):{" "}
+                  {Object.entries(report.subsystems.models_on_disk.models)
+                    .filter(([_, m]: any) => m.exists)
+                    .map(([name]: any) => name)
+                    .join(", ") || "None"}
                 </div>
               )}
             </div>

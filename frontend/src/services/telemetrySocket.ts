@@ -62,14 +62,24 @@ class TelemetrySocketService {
     return () => this.listeners.delete(cb);
   }
 
-  public sendVitalsUpdate(heart_rate: number, temperature: number, spo2: number): void {
+  public sendVitalsUpdate(
+    heart_rate: number,
+    temperature: number,
+    spo2: number,
+    respiratory_rate?: number,
+    rmssd?: number
+  ): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({
-        action: "update_vitals",
-        heart_rate,
-        temperature,
-        spo2,
-      }));
+      this.ws.send(
+        JSON.stringify({
+          action: "update_vitals",
+          heart_rate,
+          temperature,
+          spo2,
+          ...(respiratory_rate !== undefined ? { respiratory_rate } : {}),
+          ...(rmssd !== undefined ? { rmssd } : {}),
+        })
+      );
     }
   }
 

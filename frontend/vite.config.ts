@@ -21,5 +21,16 @@ export default defineConfig({
     outDir: "dist",
     assetsDir: "assets",
     emptyOutDir: true,
+    chunkSizeWarningLimit: 600,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          vendor: ["react", "react-dom"],
+          mediapipe: ["@mediapipe/tasks-vision"],
+          charts: ["chart.js", "react-chartjs-2"],
+          icons: ["lucide-react"],
+        },
+      },
+    },
   },
 });

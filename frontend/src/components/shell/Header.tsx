@@ -113,8 +113,9 @@ export const Header: React.FC<HeaderProps> = ({
           {/* 1: Overview */}
           <button
             onClick={() => setActiveTab("overview")}
+            aria-current={activeTab === "overview" ? "page" : undefined}
             className={`px-2.5 py-1.5 rounded text-xs font-medium transition-all flex items-center gap-1.5 ${
-              activeTab === "overview" || activeTab === "live"
+              activeTab === "overview"
                 ? "bg-cyan-600/30 text-cyan-300 border border-cyan-500/50 shadow-sm"
                 : "text-space-400 hover:text-space-200 hover:bg-space-850"
             }`}
@@ -129,6 +130,7 @@ export const Header: React.FC<HeaderProps> = ({
           {/* 2: Cardio */}
           <button
             onClick={() => setActiveTab("cardio")}
+            aria-current={activeTab === "cardio" ? "page" : undefined}
             className={`px-2.5 py-1.5 rounded text-xs font-medium transition-all flex items-center gap-1.5 ${
               activeTab === "cardio"
                 ? "bg-cyan-600/30 text-cyan-300 border border-cyan-500/50 shadow-sm"
@@ -145,6 +147,7 @@ export const Header: React.FC<HeaderProps> = ({
           {/* 3: Neuro */}
           <button
             onClick={() => setActiveTab("neuro")}
+            aria-current={activeTab === "neuro" ? "page" : undefined}
             className={`px-2.5 py-1.5 rounded text-xs font-medium transition-all flex items-center gap-1.5 ${
               activeTab === "neuro"
                 ? "bg-cyan-600/30 text-cyan-300 border border-cyan-500/50 shadow-sm"
@@ -161,6 +164,7 @@ export const Header: React.FC<HeaderProps> = ({
           {/* 4: Cabin */}
           <button
             onClick={() => setActiveTab("cabin")}
+            aria-current={activeTab === "cabin" ? "page" : undefined}
             className={`px-2.5 py-1.5 rounded text-xs font-medium transition-all flex items-center gap-1.5 ${
               activeTab === "cabin"
                 ? "bg-cyan-600/30 text-cyan-300 border border-cyan-500/50 shadow-sm"
@@ -177,6 +181,7 @@ export const Header: React.FC<HeaderProps> = ({
           {/* 5: Medical */}
           <button
             onClick={() => setActiveTab("medical")}
+            aria-current={activeTab === "medical" ? "page" : undefined}
             className={`px-2.5 py-1.5 rounded text-xs font-medium transition-all flex items-center gap-1.5 ${
               activeTab === "medical"
                 ? "bg-cyan-600/30 text-cyan-300 border border-cyan-500/50 shadow-sm"

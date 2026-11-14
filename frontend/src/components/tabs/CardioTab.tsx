@@ -5,6 +5,7 @@ import {
   setSensorMode,
   setSensorScenario,
 } from "../../services/api";
+import { telemetrySocketService } from "../../services/telemetrySocket";
 import {
   Heart,
   Activity,
@@ -540,7 +541,11 @@ export const CardioTab: React.FC<CardioTabProps> = ({ telemetry }) => {
                 min="40"
                 max="180"
                 value={manualHr}
-                onChange={(e) => setManualHr(parseInt(e.target.value))}
+                onChange={(e) => {
+                  const val = parseInt(e.target.value);
+                  setManualHr(val);
+                  telemetrySocketService.sendVitalsUpdate(val, manualTemp, manualSpo2, manualResp, manualRmssd);
+                }}
                 className="w-full accent-cyan-500"
               />
             </div>
@@ -556,7 +561,11 @@ export const CardioTab: React.FC<CardioTabProps> = ({ telemetry }) => {
                 min="80"
                 max="100"
                 value={manualSpo2}
-                onChange={(e) => setManualSpo2(parseInt(e.target.value))}
+                onChange={(e) => {
+                  const val = parseInt(e.target.value);
+                  setManualSpo2(val);
+                  telemetrySocketService.sendVitalsUpdate(manualHr, manualTemp, val, manualResp, manualRmssd);
+                }}
                 className="w-full accent-cyan-500"
               />
             </div>
@@ -572,7 +581,11 @@ export const CardioTab: React.FC<CardioTabProps> = ({ telemetry }) => {
                 min="10"
                 max="120"
                 value={manualRmssd}
-                onChange={(e) => setManualRmssd(parseInt(e.target.value))}
+                onChange={(e) => {
+                  const val = parseInt(e.target.value);
+                  setManualRmssd(val);
+                  telemetrySocketService.sendVitalsUpdate(manualHr, manualTemp, manualSpo2, manualResp, val);
+                }}
                 className="w-full accent-cyan-500"
               />
             </div>

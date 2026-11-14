@@ -93,11 +93,29 @@ export const NeuroTab: React.FC<NeuroTabProps> = ({ telemetry }) => {
     fetchPVTHistory(5)
       .then((res) => setPvtPastRecords(res.records || []))
       .catch(() => {});
+
+    // Unmount cleanup to prevent timer / animationFrame leaks when switching tabs
+    return () => {
+      if (pvtTimerRef.current) clearTimeout(pvtTimerRef.current);
+      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+      if (testTimeoutRef.current) clearTimeout(testTimeoutRef.current);
+    };
   }, []);
 
   // Keyboard shortcut listener for PVT spacebar hit
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Ignore if user is currently typing inside an input or textarea
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+
       if (e.code === "Space" && pvtRunning) {
         e.preventDefault();
         handlePvtHit();
@@ -133,8 +151,8 @@ export const NeuroTab: React.FC<NeuroTabProps> = ({ telemetry }) => {
   const scheduleNextStimulus = () => {
     setPvtStatus("WAITING");
     setTickerMs(0);
-    // Random delay between 2 and 6 seconds for responsive testing
-    const delayMs = Math.floor(Math.random() * 4000) + 2000;
+    // Random delay between 2 and 10 seconds per Basner & Dinges (2011) standards
+    const delayMs = Math.floor(Math.random() * 8000) + 2000;
 
     pvtTimerRef.current = setTimeout(() => {
       const now = performance.now();
@@ -393,7 +411,7 @@ export const NeuroTab: React.FC<NeuroTabProps> = ({ telemetry }) => {
             >
               <div className="w-16 h-16 rounded-full border-2 border-dashed border-space-600 animate-spin mx-auto" />
               <p className="text-xs font-mono text-space-400 uppercase tracking-widest animate-pulse">
-                Awaiting Stimulus (Random ISI 2-6s)... Do Not False Start!
+                Awaiting Stimulus (Random ISI 2-10s)... Do Not False Start!
               </p>
             </div>
           )}

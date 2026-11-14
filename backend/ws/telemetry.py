@@ -66,6 +66,14 @@ async def _handle_client_message(msg: dict, state) -> None:
             state.temperature = float(msg["temperature"])
         if "spo2" in msg:
             state.spo2 = float(msg["spo2"])
+        if "respiratory_rate" in msg:
+            state.manual_respiratory_rate = float(msg["respiratory_rate"])
+        if "rmssd" in msg:
+            state.manual_rmssd = float(msg["rmssd"])
+        if "sdnn" in msg:
+            state.manual_sdnn = float(msg["sdnn"])
+        if "baevsky_index" in msg:
+            state.manual_baevsky_index = float(msg["baevsky_index"])
 
     elif action == "update_settings":
         if "manual_override" in msg:
