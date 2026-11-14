@@ -49,3 +49,44 @@ code, pre, .font-mono {
   background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.03), rgba(0, 255, 0, 0.01), rgba(0, 0, 255, 0.03));
   background-size: 100% 3px, 6px 100%;
 }
+
+/* Circadian Night Shift (620nm Low-Melatonin Suppression Spectrum) */
+.night-circadian {
+  filter: sepia(0.25) hue-rotate(-15deg) contrast(1.05);
+  background-color: #0a0404;
+}
+
+.night-circadian header {
+  background-color: rgba(20, 8, 8, 0.95) !important;
+  border-color: #7f1d1d !important;
+}
+
+.night-circadian .bg-space-950 {
+  background-color: #080303 !important;
+}
+
+.night-circadian .bg-space-900 {
+  background-color: #110505 !important;
+}
+
+.night-circadian .bg-space-850 {
+  background-color: #1a0808 !important;
+}
+
+.night-circadian .bg-space-800 {
+  background-color: #240c0c !important;
+}
+
+.night-circadian .border-space-800,
+.night-circadian .border-space-700 {
+  border-color: #451a1a !important;
+}
+
+@keyframes pulseSlow {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.animate-pulse-slow {
+  animation: pulseSlow 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}

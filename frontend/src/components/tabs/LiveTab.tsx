@@ -37,7 +37,7 @@ const EMOTION_COLORS: Record<string, string> = {
   disgust: "#2ecc71",
 };
 
-export const LiveTab: React.FC<LiveTabProps> = ({ telemetry }) => {
+export const LiveTab: React.FC<LiveTabProps> = ({ telemetry, onNavigateTab }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -261,6 +261,25 @@ export const LiveTab: React.FC<LiveTabProps> = ({ telemetry }) => {
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto pb-12 font-sans">
+      {/* Active IEC 60601-1-8 Alarm Banner */}
+      {telemetry?.alarms?.active_alarms && telemetry.alarms.active_alarms.length > 0 && (
+        <div className="p-3 rounded-xl bg-red-950/50 border border-red-500/60 flex items-center justify-between shadow-glow-critical">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-red-400 animate-pulse" />
+            <span className="text-xs font-mono font-bold text-red-200">
+              IEC ALARM [{telemetry.alarms.active_alarms[0].code}]: {telemetry.alarms.active_alarms[0].message}
+            </span>
+          </div>
+          <button
+            onClick={() => onNavigateTab("overview")}
+            className="text-xs font-mono text-cyan-300 hover:text-cyan-100 underline flex items-center gap-1"
+          >
+            <span>Cockpit Overview</span>
+            <span>&rarr;</span>
+          </button>
+        </div>
+      )}
+
       {/* ──────────────────────────────────────────────────────────────────────── */}
       {/* ROW 1: Side-by-Side Live Feeds (Webcam Vision & Acoustic Telemetry)      */}
       {/* ──────────────────────────────────────────────────────────────────────── */}

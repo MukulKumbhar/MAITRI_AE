@@ -5,6 +5,13 @@ import { WatchdogBanner } from "./components/shell/WatchdogBanner";
 import { HandsFreeStudyModal } from "./components/shell/HandsFreeStudyModal";
 import { VoiceDebugDrawer } from "./components/shell/VoiceDebugDrawer";
 import { CabinAudioPlayer } from "./components/shell/CabinAudioPlayer";
+import { BistModal } from "./components/shell/BistModal";
+
+import { OverviewTab } from "./components/tabs/OverviewTab";
+import { CardioTab } from "./components/tabs/CardioTab";
+import { NeuroTab } from "./components/tabs/NeuroTab";
+import { CabinTab } from "./components/tabs/CabinTab";
+import { MedicalTab } from "./components/tabs/MedicalTab";
 import { LiveTab } from "./components/tabs/LiveTab";
 import { LogsTab } from "./components/tabs/LogsTab";
 import { DemoTab } from "./components/tabs/DemoTab";
@@ -12,20 +19,32 @@ import { SupportTab } from "./components/tabs/SupportTab";
 
 import { telemetrySocketService } from "./services/telemetrySocket";
 import { audioService } from "./services/audioSocket";
-import { acknowledgeWatchdog } from "./services/api";
+import { acknowledgeWatchdog, pauseAlarmAudio } from "./services/api";
+
+const ALL_TABS: TabId[] = [
+  "overview",
+  "cardio",
+  "neuro",
+  "cabin",
+  "medical",
+  "logs",
+  "live",
+  "mission",
+  "support",
+];
 
 export const App: React.FC = () => {
   const getInitialTab = (): TabId => {
     try {
       const hash = window.location.hash.replace("#", "") as TabId;
-      if (["live", "logs", "mission", "support"].includes(hash)) return hash;
+      if (ALL_TABS.includes(hash)) return hash;
       const params = new URLSearchParams(window.location.search);
       const tab = params.get("tab") as TabId;
-      if (["live", "logs", "mission", "support"].includes(tab)) return tab;
+      if (ALL_TABS.includes(tab)) return tab;
     } catch {
       // fallback
     }
-    return "live";
+    return "overview";
   };
 
   const getInitialStudy = (): boolean => {
@@ -50,8 +69,17 @@ export const App: React.FC = () => {
   const [telemetry, setTelemetry] = useState<TelemetryPayload | null>(null);
   const [isStudyOpen, setIsStudyOpen] = useState<boolean>(getInitialStudy());
   const [isVoiceDebugOpen, setIsVoiceDebugOpen] = useState<boolean>(getInitialVoiceDebug());
+  const [isBistOpen, setIsBistOpen] = useState<boolean>(false);
+  const [isCircadianNight, setIsCircadianNight] = useState<boolean>(false);
   const [voiceDebugState, setVoiceDebugState] = useState<VoiceDebugInfo>(audioService.debugState);
   const [isMicCapturing, setIsMicCapturing] = useState<boolean>(false);
+
+  // Keep URL hash in sync with activeTab
+  useEffect(() => {
+    try {
+      window.location.hash = activeTab;
+    } catch {}
+  }, [activeTab]);
 
   // Initialize WebSockets on mount
   useEffect(() => {
@@ -68,12 +96,21 @@ export const App: React.FC = () => {
       setVoiceDebugState({ ...audioService.debugState });
       setIsMicCapturing(audioService.getIsCapturing());
 
-      // G-07: Autonomous Voice Director Action Execution
+      // Autonomous Voice Director Action Execution
       if (event.type === "voice_action_dispatched") {
         if (event.action === "navigate" && event.target) {
           const targetTab = event.target as TabId;
-          setActiveTab(targetTab);
-        } else if (event.action === "watchdog_ack" || event.action === "critical_override_confirmed") {
+          if (ALL_TABS.includes(targetTab)) {
+            setActiveTab(targetTab);
+          }
+        } else if (event.action === "circadian_night" || event.action === "night_mode") {
+          setIsCircadianNight(true);
+        } else if (event.action === "day_mode") {
+          setIsCircadianNight(false);
+        } else if (
+          event.action === "watchdog_ack" ||
+          event.action === "critical_override_confirmed"
+        ) {
           acknowledgeWatchdog();
         }
       }
@@ -85,7 +122,7 @@ export const App: React.FC = () => {
     };
   }, []);
 
-  // G-09: Tactile Hotkey Listener (Keys 1-4 for instant view switching)
+  // Hotkey Listener (Keys 1-5 for instant view switching)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // Ignore if user is currently typing inside an input or textarea
@@ -100,16 +137,19 @@ export const App: React.FC = () => {
 
       if (e.key === "1") {
         e.preventDefault();
-        setActiveTab("live");
+        setActiveTab("overview");
       } else if (e.key === "2") {
         e.preventDefault();
-        setActiveTab("logs");
+        setActiveTab("cardio");
       } else if (e.key === "3") {
         e.preventDefault();
-        setActiveTab("mission");
+        setActiveTab("neuro");
       } else if (e.key === "4") {
         e.preventDefault();
-        setActiveTab("support");
+        setActiveTab("cabin");
+      } else if (e.key === "5") {
+        e.preventDefault();
+        setActiveTab("medical");
       }
     };
 
@@ -138,21 +178,37 @@ export const App: React.FC = () => {
     }
   };
 
+  const handlePauseAlarmAudio = async () => {
+    try {
+      await pauseAlarmAudio(120.0);
+    } catch {}
+  };
+
   return (
-    <div className="min-h-screen bg-space-950 text-space-100 flex flex-col font-sans">
-      {/* Shell Header (G-01, G-02, G-10) */}
+    <div
+      className={`min-h-screen bg-space-950 text-space-100 flex flex-col font-sans transition-colors duration-500 ${
+        isCircadianNight ? "night-circadian" : ""
+      }`}
+    >
+      {/* Shell Header */}
       <Header
         activeTab={activeTab}
         setActiveTab={setActiveTab}
+        isCircadianNight={isCircadianNight}
+        onToggleCircadianNight={() => setIsCircadianNight((prev) => !prev)}
+        onOpenBist={() => setIsBistOpen(true)}
+        alarms={telemetry?.alarms}
+        onPauseAlarmAudio={handlePauseAlarmAudio}
         onOpenStudy={() => setIsStudyOpen(true)}
         onOpenVoiceDebug={() => setIsVoiceDebugOpen(true)}
         isVoiceSpeaking={voiceDebugState.is_speaking}
         isVoskReady={voiceDebugState.vosk_ready}
         isMicCapturing={isMicCapturing}
         onToggleMic={handleToggleMic}
+        auditHash={telemetry?.security?.audit_hash}
       />
 
-      {/* Global Watchdog Banner (G-03, G-04, G-05) */}
+      {/* Global Watchdog Banner */}
       {telemetry?.watchdog && (
         <WatchdogBanner
           watchdog={telemetry.watchdog}
@@ -162,7 +218,14 @@ export const App: React.FC = () => {
       )}
 
       {/* Main Tab Content */}
-      <main className="flex-1 p-6 max-w-7xl w-full mx-auto">
+      <main className="flex-1 p-4 lg:p-6 max-w-7xl w-full mx-auto">
+        {activeTab === "overview" && (
+          <OverviewTab telemetry={telemetry} onNavigateTab={setActiveTab} />
+        )}
+        {activeTab === "cardio" && <CardioTab telemetry={telemetry} />}
+        {activeTab === "neuro" && <NeuroTab telemetry={telemetry} />}
+        {activeTab === "cabin" && <CabinTab telemetry={telemetry} />}
+        {activeTab === "medical" && <MedicalTab />}
         {activeTab === "live" && (
           <LiveTab telemetry={telemetry} onNavigateTab={setActiveTab} />
         )}
@@ -173,7 +236,15 @@ export const App: React.FC = () => {
         {activeTab === "support" && <SupportTab telemetry={telemetry} />}
       </main>
 
-      {/* G-08: Astronaut Hands-Free Navigation Study Collapsible/Modal */}
+      {/* Built-In Self-Test & Cryptographic Ledger Modal */}
+      <BistModal
+        isOpen={isBistOpen}
+        onClose={() => setIsBistOpen(false)}
+        auditHash={telemetry?.security?.audit_hash}
+        auditCount={telemetry?.security?.entry_count}
+      />
+
+      {/* Astronaut Hands-Free Navigation Study Modal */}
       <HandsFreeStudyModal
         isOpen={isStudyOpen}
         onClose={() => setIsStudyOpen(false)}
@@ -188,7 +259,7 @@ export const App: React.FC = () => {
         onToggleMic={handleToggleMic}
       />
 
-      {/* G-06: Global Cabin Audio Autoplay */}
+      {/* Global Cabin Audio Autoplay */}
       <CabinAudioPlayer />
     </div>
   );
